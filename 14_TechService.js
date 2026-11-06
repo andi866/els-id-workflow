@@ -96,10 +96,23 @@ function dataTeknisi_(session, trxId) {
 
   var mulai = Util.isoStr(trx.activation_start_at);
   var selesai = Util.isoStr(trx.activation_done_at);
+  /*
+   * Lama pengerjaan, dengan penjagaan terhadap tanggal yang tidak
+   * terbaca.
+   *
+   * Kalau tanggal mulainya tersimpan dalam bentuk yang tidak bisa
+   * dibaca, pengurangannya menghasilkan bukan-angka — dan di layar
+   * tertulis "NaN menit", yang tidak berarti apa-apa bagi siapa pun
+   * yang membacanya.
+   */
   var durasi = 0;
   if (mulai) {
-    var akhir = selesai ? new Date(selesai).getTime() : new Date().getTime();
-    durasi = Math.max(Math.round((akhir - new Date(mulai).getTime()) / 60000), 0);
+    var awalMs = new Date(mulai).getTime();
+    var akhirMs = selesai ? new Date(selesai).getTime() : new Date().getTime();
+
+    if (!isNaN(awalMs) && !isNaN(akhirMs)) {
+      durasi = Math.max(Math.round((akhirMs - awalMs) / 60000), 0);
+    }
   }
 
   return {
@@ -335,9 +348,23 @@ function apiStartActivation(payload) {
      * menyetujui, barangnya boleh jalan, tapi tidak ada yang bisa
      * mengerjakannya.
      */
+    /*
+     * Saklar "Teknisi sebelum Kasir" ikut dibaca di sini.
+     *
+     * Inilah yang masih menahan: layarnya sudah mengizinkan, tapi
+     * penjaga di server ini belum tahu soal saklar itu — jadi
+     * tombolnya bisa ditekan dan langsung ditolak. Lebih
+     * membingungkan daripada kalau tombolnya memang tidak ada.
+     *
+     * Yang tetap dijaga tinggal satu: barang tidak boleh keluar
+     * sebelum dibayar. Penjaga itu ada di penyerahan, bukan di
+     * sini — dan memang di situ tempatnya.
+     */
     var lunas = String(trx.payment_status) === 'LUNAS' ||
                 !!String(trx.tempo_jatuh || '').trim() ||
-                Util.isTrue(trx.tek_dulu);
+                Util.isTrue(trx.tek_dulu) ||
+                Util.isTrue(Settings.get('TEKNISI_SEBELUM_KASIR', 'FALSE'));
+
     var pakaiOverride = false;
 
     if (!lunas) {

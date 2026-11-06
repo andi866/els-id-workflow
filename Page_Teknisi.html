@@ -560,7 +560,7 @@ var TeknisiDetail = {
             '<div><b style="font-size:16px">🔧 Sedang dikerjakan</b>' +
             '<div class="small">Mulai ' + Fmt.esc(Fmt.jam(h.activation_start_at)) + '</div></div>' +
             '<div style="text-align:right"><b class="mono" style="font-size:24px" id="tk-durasi">' +
-              h.durasi_menit + ' menit</b><div class="small muted">berjalan</div></div>' +
+              (Number(h.durasi_menit) || 0) + ' menit</b><div class="small muted">berjalan</div></div>' +
           '</div></div>'
         : '') +
 
@@ -572,7 +572,7 @@ var TeknisiDetail = {
           '</b>' +
           '<div class="small">Mulai ' + Fmt.esc(Fmt.jam(h.activation_start_at)) +
           ' · selesai ' + Fmt.esc(Fmt.jam(h.activation_done_at)) +
-          ' · lama pengerjaan ' + h.durasi_menit + ' menit</div>' +
+          ' · lama pengerjaan ' + (Number(h.durasi_menit) || 0) + ' menit</div>' +
           (h.diserahkan
             ? '<div class="small muted">Diserahkan ' + Fmt.esc(Fmt.jam(h.diserahkan.at)) +
               ' oleh ' + Fmt.esc(h.diserahkan.by) + '</div>'
@@ -1044,7 +1044,7 @@ var TeknisiDetail = {
           '<div class="between mt8"><span class="muted">Transaksi</span><b class="mono">' +
             Fmt.esc(h.trx_no) + '</b></div>' +
           '<div class="between mt8"><span class="muted">Lama pengerjaan</span><b>' +
-            h.durasi_menit + ' menit</b></div>' +
+            (Number(h.durasi_menit) || 0) + ' menit</b></div>' +
           '<div class="field mt16 mb0"><label>Catatan aktivasi</label>' +
             '<input type="text" id="tk-catatan" placeholder="opsional, contoh: sudah dipasang Office dan antivirus"></div>',
         onOk: function (close, btn) {
