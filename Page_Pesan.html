@@ -1,0 +1,240 @@
+<script>
+/* ============================================================
+   PESAN ANTAR DIVISI
+
+   Untuk hal yang tidak punya nomor pesanan: "stok screen Vivan
+   masih ada?", "kasir tolong cek transfer yang tadi".
+
+   Dipisah per pasangan divisi, bukan satu ruang untuk semua.
+   Ruang bersama membuat tiap orang membaca pesan yang bukan
+   urusannya, dan yang penting tenggelam di antaranya.
+
+   Untuk pertanyaan tentang satu pesanan tertentu, tempatnya di
+   kotak percakapan pada pesanan itu — bukan di sini.
+   ============================================================ */
+App.pages.pesan = {
+  title: 'Pesan',
+  divisi: null,
+  belum: {},
+  jeda: null,
+  idTerakhir: null,
+
+  daftarDivisi: function () {
+    var saya = App.state.session.role;
+
+    return [
+      ['SALES', 'Sales NB'],
+      ['SALES_ONLINE', 'Sales Online'],
+      ['GUDANG', 'Gudang'],
+      ['EKSEKUSI', 'Tim Eksekusi'],
+      ['ADMIN', 'Admin'],
+      ['KASIR', 'Kasir'],
+      ['TEKNISI', 'Teknisi Support'],
+      ['SUPERADMIN', 'Super Admin']
+    ].filter(function (x) { return x[0] !== saya; });
+  },
+
+  html: function () {
+    var P = App.pages.pesan;
+
+    return '' +
+      '<div class="card">' +
+        '<h3 class="mb0">Kirim pesan ke divisi lain</h3>' +
+        '<p class="hint">Untuk hal umum. Kalau menyangkut satu pesanan, ' +
+        'pakai kotak percakapan di pesanan itu supaya pertanyaannya ' +
+        'tidak lepas dari barangnya.</p>' +
+
+        '<div class="inline chips mt16" id="ps-divisi">' +
+          P.daftarDivisi().map(function (d) {
+            var aktif = P.divisi === d[0];
+            return '<button class="btn sm ' + (aktif ? '' : 'ghost') +
+              '" data-d="' + d[0] + '">' + Fmt.esc(d[1]) +
+              '<span class="ps-nb" data-d="' + d[0] + '"></span></button>';
+          }).join('') +
+        '</div>' +
+      '</div>' +
+
+      '<div class="mt16" id="ps-ruang">' +
+        (P.divisi ? '' : '<div class="empty"><b>Pilih divisi dulu</b>' +
+          'Percakapannya dipisah per divisi, supaya tidak tercampur.</div>') +
+      '</div>';
+  },
+
+  mount: function () {
+    var P = App.pages.pesan;
+
+    document.getElementById('ps-divisi').onclick = function (e) {
+      var b = e.target.closest('button[data-d]'); if (!b) return;
+      P.divisi = b.dataset.d;
+
+      document.querySelectorAll('#ps-divisi button').forEach(function (x) {
+        x.classList.toggle('ghost', x.dataset.d !== P.divisi);
+      });
+
+      P.muat();
+    };
+
+    P.ringkas();
+    if (P.divisi) P.muat();
+
+    /*
+     * Pesan masuk muncul sendiri, tanpa perlu memuat ulang.
+     *
+     * Dicek tiap lima detik — cukup cepat untuk terasa seperti
+     * percakapan, dan cukup jarang untuk tidak membebani. Hanya
+     * pesan baru yang ditambahkan ke bawah, jadi yang sedang
+     * mengetik tidak terganggu.
+     */
+    clearInterval(P.jeda);
+    P.jeda = setInterval(function () {
+      if (App.state.page !== 'pesan') { clearInterval(P.jeda); return; }
+      if (!P.divisi) return;
+      if (document.hidden) return;
+      P.muatBaru();
+    }, 5000);
+  },
+
+  /** Menambahkan pesan yang belum ada, tanpa menggambar ulang */
+  muatBaru: function () {
+    var P = App.pages.pesan;
+    var daftar = document.getElementById('ps-daftar');
+    if (!daftar) return;
+
+    api('apiPesanDivisi', { divisi: P.divisi }).then(function (d) {
+      if (!d.list.length) return;
+
+      var terakhir = d.list[d.list.length - 1];
+      if (P.idTerakhir === terakhir.chat_id) return;
+
+      var adaBaru = false;
+      var menempel = (daftar.scrollTop + daftar.clientHeight + 40) >= daftar.scrollHeight;
+
+      d.list.forEach(function (c) {
+        if (daftar.querySelector('[data-cid="' + c.chat_id + '"]')) return;
+        if (c.milik_saya) return;           // sudah tampil saat dikirim
+
+        if (daftar.querySelector('.empty')) daftar.innerHTML = '';
+        daftar.insertAdjacentHTML('beforeend', P.baris(c));
+        adaBaru = true;
+      });
+
+      P.idTerakhir = terakhir.chat_id;
+
+      // Digulir ke bawah hanya kalau memang sedang di bawah
+      if (adaBaru && menempel) daftar.scrollTop = daftar.scrollHeight;
+      if (adaBaru) P.ringkas();
+    }).catch(function () {});
+  },
+
+  /** Angka belum dibaca per divisi */
+  ringkas: function () {
+    api('apiPesanRingkas', {}).then(function (d) {
+      App.pages.pesan.belum = d.per_divisi || {};
+
+      document.querySelectorAll('.ps-nb').forEach(function (el) {
+        var n = (d.per_divisi || {})[el.dataset.d] || 0;
+        el.textContent = n ? '  ' + n : '';
+        el.style.cssText = n
+          ? 'background:var(--danger);color:#fff;border-radius:99px;' +
+            'padding:0 6px;margin-left:6px;font-size:11px;font-weight:700'
+          : '';
+      });
+    }).catch(function () {});
+  },
+
+  muat: function () {
+    var P = App.pages.pesan;
+    var ruang = document.getElementById('ps-ruang');
+    if (!ruang) return;
+
+    ruang.innerHTML = (typeof memuatHtml === 'function')
+      ? memuatHtml() : '<div class="empty">Memuat…</div>';
+
+    api('apiPesanDivisi', { divisi: P.divisi }).then(function (d) {
+      ruang.innerHTML =
+        '<div class="card">' +
+          '<div id="ps-daftar" style="max-height:52vh;overflow-y:auto;padding:4px 2px">' +
+            (d.list.length
+              ? d.list.map(P.baris).join('')
+              : '<div class="empty" style="padding:22px"><b>Belum ada pesan</b>' +
+                'Tulis di bawah untuk memulai.</div>') +
+          '</div>' +
+
+          '<div class="inline mt16" style="flex-wrap:nowrap">' +
+            '<input type="text" id="ps-ketik" maxlength="500" ' +
+              'style="flex:1;min-width:0" placeholder="Tulis pesan…" autocomplete="off">' +
+            '<button class="btn" id="ps-kirim">Kirim</button>' +
+          '</div>' +
+        '</div>';
+
+      var kotak = document.getElementById('ps-ketik');
+      kotak.onkeydown = function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); P.kirim(); }
+      };
+      document.getElementById('ps-kirim').onclick = P.kirim;
+      kotak.focus();
+
+      var daftar = document.getElementById('ps-daftar');
+      if (daftar) daftar.scrollTop = daftar.scrollHeight;
+
+      if (d.list.length) P.idTerakhir = d.list[d.list.length - 1].chat_id;
+      P.ringkas();
+
+    }).catch(function (e) {
+      ruang.innerHTML = '<div class="empty"><b>Pesan tidak bisa dimuat</b>' +
+        Fmt.esc(e.message + (e.code ? '  [' + e.code + ']' : '')) + '</div>';
+    });
+  },
+
+  baris: function (c) {
+    var sendiri = c.milik_saya;
+
+    return '<div data-cid="' + Fmt.esc(c.chat_id || '') +
+        '" style="display:flex;margin-bottom:10px;' +
+        (sendiri ? 'justify-content:flex-end' : '') + '">' +
+      '<div style="max-width:78%;background:' +
+        (sendiri ? 'var(--brand-soft)' : 'var(--paper)') + ';' +
+        'padding:9px 12px;border-radius:12px">' +
+        '<div class="small" style="font-weight:700;color:' +
+          (sendiri ? 'var(--brand)' : 'var(--muted)') + '">' +
+          Fmt.esc(c.user_name) + ' · ' + Fmt.esc(c.role_label) + '</div>' +
+        '<div style="font-size:14px;margin-top:2px;white-space:pre-wrap;' +
+          'word-break:break-word">' + Fmt.esc(c.pesan) + '</div>' +
+        '<div class="small muted" style="margin-top:3px">' +
+          Fmt.esc(Fmt.jam(c.at)) + '</div>' +
+      '</div></div>';
+  },
+
+  kirim: function () {
+    var P = App.pages.pesan;
+    var kotak = document.getElementById('ps-ketik');
+    if (!kotak) return;
+
+    var teks = kotak.value.trim();
+    if (!teks) return;
+    if (!P.divisi) return toast('Pilih dulu divisi yang dituju.', 'err');
+
+    /*
+     * Pesannya langsung tampil, pengirimannya di belakang.
+     *
+     * Orang yang menulis sambil mengerjakan sesuatu tidak perlu
+     * menunggu layar. Kalau gagal, pemberitahuannya muncul.
+     */
+    kotak.value = '';
+    var daftar = document.getElementById('ps-daftar');
+
+    if (daftar) {
+      if (daftar.querySelector('.empty')) daftar.innerHTML = '';
+      daftar.insertAdjacentHTML('beforeend', P.baris({
+        user_name: App.state.session.full_name,
+        role_label: Fmt.roleLabel(App.state.session.role),
+        pesan: teks, at: new Date().toISOString(), milik_saya: true
+      }));
+      daftar.scrollTop = daftar.scrollHeight;
+    }
+
+    api('apiChatKirim', { tujuan: P.divisi, pesan: teks, idem: uid() })
+      .catch(function (e) { toast('Pesan gagal terkirim: ' + e.message, 'err'); });
+  }
+};
+</script>

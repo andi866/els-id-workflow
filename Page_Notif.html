@@ -1,0 +1,576 @@
+<script>
+/* ============================================================
+   PUSAT NOTIFIKASI
+
+   Satu pengecek melayani seluruh divisi. Kalau tiap divisi punya
+   pengeceknya sendiri, kuota Apps Script habis berkali lipat.
+
+   Yang ditanyakan cuma satu angka penanda. Selama angkanya sama,
+   server tidak membaca spreadsheet sama sekali.
+   ============================================================ */
+
+var NotifCenter = {
+  timer: null,
+  pulse: -1,
+  data: { total: 0, penting: 0, perMenu: {}, list: [] },
+  kerja: {},
+  segarTerakhir: 0,
+  dikenal: {},          // notif yang sudah pernah ditampilkan sebagai toast
+  pertamaKali: true,
+
+  /*
+   * Jeda pengecekan disesuaikan per divisi.
+   *
+   * Hanya Gudang yang benar-benar butuh tahu dalam hitungan detik,
+   * karena alarmnya menentukan seberapa cepat barang mulai disiapkan.
+   * Divisi lain melihat pekerjaan yang sudah mengantre — tahu 25 detik
+   * lebih lambat tidak mengubah apa pun.
+   *
+   * Dari pengukuran: pengecekan berkala menyumbang sebagian besar dari
+   * 13.905 permintaan sehari. Memperlambatnya untuk divisi yang tidak
+   * membutuhkan adalah cara paling murah mengurangi beban tanpa
+   * mengorbankan siapa pun.
+   */
+  jedaDiam: 40000,
+  terakhirSentuh: Date.now(),
+
+  jedaAktifPerRole: function () {
+    var s = App.state.session;
+    if (!s) return 30000;
+    if (s.role === 'GUDANG' || s.role === 'SUPERADMIN') return 12000;
+    if (s.role === 'TEKNISI') return 20000;
+    return 25000;
+  },
+
+  mulai: function () {
+    clearInterval(NotifCenter.timer);
+
+    ['mousemove', 'keydown', 'click', 'touchstart'].forEach(function (ev) {
+      document.addEventListener(ev, function () {
+        NotifCenter.terakhirSentuh = Date.now();
+      }, { passive: true });
+    });
+
+    /*
+     * Layar yang tidak sedang dilihat tidak perlu dicek sama sekali.
+     *
+     * Komputer di toko sering meninggalkan aplikasi ini di tab belakang
+     * seharian. Tanpa ini, tab itu tetap menanyai server setiap belasan
+     * detik untuk layar yang tidak dilihat siapa pun.
+     */
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) {
+        NotifCenter.terakhirSentuh = Date.now();
+        NotifCenter.cek();
+      }
+    });
+
+    NotifCenter.pasangJadwal(NotifCenter.jedaAktifPerRole());
+    NotifCenter.cek();
+  },
+
+  /**
+   * Layar yang ditinggal menyala tidak perlu dicek serapat layar yang
+   * sedang dipakai. Ini menghemat kuota tanpa mengurangi kecepatan
+   * bagi orang yang benar-benar sedang bekerja.
+   */
+  pasangJadwal: function (jeda) {
+    if (NotifCenter.jedaSekarang === jeda) return;
+    NotifCenter.jedaSekarang = jeda;
+    clearInterval(NotifCenter.timer);
+    NotifCenter.timer = setInterval(function () {
+      /*
+       * Tab di belakang TETAP diperiksa, hanya lebih jarang.
+       *
+       * Ini kesalahan saya sebelumnya. Saya menghentikannya sama sekali
+       * demi menghemat kuota — padahal di toko aplikasi hampir selalu
+       * terbuka di tab belakang sementara stafnya mengerjakan hal lain.
+       *
+       * Akibatnya seharian hampir semua layar berhenti bertanya ke
+       * server, dan perubahan dari divisi lain baru muncul saat orangnya
+       * kebetulan mengklik tabnya. Itu yang terbaca sebagai "Gudang
+       * sudah selesai tapi baru muncul di Admin tiga puluh menit
+       * kemudian".
+       *
+       * Menghemat kuota tidak ada gunanya kalau yang dikorbankan
+       * justru hal yang membuat sistem ini dipakai.
+       */
+      var diam = Date.now() - NotifCenter.terakhirSentuh > 300000;   // 5 menit
+      var jedaBaru = document.hidden
+        ? Math.max(NotifCenter.jedaAktifPerRole(), 20000)
+        : (diam ? NotifCenter.jedaDiam : NotifCenter.jedaAktifPerRole());
+
+      NotifCenter.pasangJadwal(jedaBaru);
+      NotifCenter.cek();
+    }, jeda);
+  },
+
+  cek: function () {
+    var s = App.state.session;
+    if (!s) {
+      NotifCenter.pulse = -1;
+      NotifCenter.pertamaKali = true;
+      NotifCenter.dikenal = {};
+      return;
+    }
+
+    /*
+     * Jaring pengaman: halaman disegarkan paling lambat tiap menit,
+     * walau tidak ada penanda perubahan sama sekali.
+     *
+     * Selama ini penyegaran bergantung pada penanda yang dinaikkan saat
+     * pemberitahuan tertulis. Kalau penulisan itu gagal — sheet penuh,
+     * jaringan putus di tengah — penandanya tidak pernah naik dan
+     * layar bisa diam berjam-jam tanpa ada yang tahu.
+     *
+     * Satu pembacaan daftar per menit jauh lebih murah daripada satu
+     * divisi menunggu dua jam untuk pekerjaan yang sudah ada.
+     */
+    if (Date.now() - (NotifCenter.segarTerakhir || 0) > 60000) {
+      NotifCenter.segarTerakhir = Date.now();
+      NotifCenter.segarTerakhir = Date.now();
+      NotifCenter.segarkanHalaman();
+    }
+
+    api('apiPulse', { lastPulse: NotifCenter.pulse }).then(function (d) {
+
+      /*
+       * Angka pekerjaan diperbarui LEBIH DULU, sebelum apa pun.
+       *
+       * Dulu bagian ini dilewati kalau tidak ada pemberitahuan baru —
+       * padahal pekerjaan paling sering berkurang justru tanpa
+       * pemberitahuan apa pun. Kasir menuntaskan pembayaran, Teknisi
+       * menyerahkan barang: tidak ada notifikasi, jadi angkanya tidak
+       * pernah turun sampai kebetulan ada pesanan baru masuk.
+       */
+      if (d.kerja) {
+        NotifCenter.kerja = d.kerja;
+        NotifCenter.gambarBadge();
+        NotifCenter.cekPesan();
+      }
+
+      // Layar Gudang mengurus angkanya sendiri dari antrian, supaya
+      // angka di menu dan isi layar selalu berasal dari satu jawaban.
+      if (window.GudangWatch && typeof GudangWatch.segarkan === 'function' &&
+          ['GUDANG', 'SUPERADMIN'].indexOf(s.role) >= 0) {
+        GudangWatch.segarkan();
+      }
+
+      /*
+       * Perubahan dari akun lain menyegarkan layar, walau tidak ada
+       * pemberitahuan untuk divisi ini.
+       *
+       * Pemberitahuan hanya dikirim ke divisi yang harus bertindak.
+       * Tapi yang lain pun perlu melihat keadaan terbaru — Admin
+       * yang memantau, Super Admin yang mengawasi, Sales yang
+       * menunggu kabar pesanannya.
+       */
+      var adaPerubahan = d.pulse !== NotifCenter.pulse;
+      NotifCenter.pulse = d.pulse;
+
+      if (adaPerubahan) NotifCenter.segarkanHalaman();
+      if (!d.notif) return;
+
+      NotifCenter.data = d.notif;
+      NotifCenter.gambarBadge();
+      NotifCenter.munculkanToast(d.notif.list);
+
+      /*
+       * Halaman yang sedang dibuka ikut disegarkan.
+       *
+       * Sebelumnya hanya layar Gudang yang melakukannya. Divisi lain
+       * hanya memperbarui angka di menu — daftarnya sendiri tetap
+       * menampilkan isi saat halaman dibuka. Teknisi yang membuka
+       * antrian jam lima baru melihat transaksi baru jam tujuh, saat
+       * dia kebetulan berpindah halaman.
+       *
+       * Angka yang berubah tanpa daftarnya ikut berubah justru
+       * membingungkan: badge menunjukkan ada pekerjaan, layarnya kosong.
+       */
+      NotifCenter.segarkanHalaman();
+      NotifCenter.pertamaKali = false;
+    }).catch(function () {});
+  },
+
+  /** Angka kecil di samping menu, supaya terlihat tanpa membuka apa pun */
+
+  pesanTerakhir: -1,
+
+  /**
+   * Memeriksa pesan baru dari divisi lain.
+   *
+   * Bunyinya pendek sekali — satu nada, bukan alarm. Pesan bukan
+   * panggilan kerja: yang perlu diketahui cuma ada yang menulis,
+   * dan orangnya sendiri yang menentukan kapan menjawab.
+   */
+  cekPesan: function () {
+    api('apiPesanRingkas', {}).then(function (d) {
+      var n = Number(d.total) || 0;
+
+      NotifCenter.kerja.pesan = n;
+      NotifCenter.gambarBadge();
+
+      var naik = NotifCenter.pesanTerakhir >= 0 && n > NotifCenter.pesanTerakhir;
+      NotifCenter.pesanTerakhir = n;
+
+      if (!naik) return;
+
+      /*
+       * Tidak ditampilkan kalau percakapannya memang sedang dibuka.
+       *
+       * Pesannya sudah muncul sendiri di layar itu — menampilkannya
+       * lagi sebagai pemberitahuan berarti orang yang sedang membaca
+       * diganggu oleh hal yang baru saja dibacanya.
+       */
+      var dariDivisi = '';
+      var jml = 0;
+      Object.keys(d.per_divisi || {}).forEach(function (k) {
+        if ((d.per_divisi[k] || 0) > jml) { jml = d.per_divisi[k]; dariDivisi = k; }
+      });
+
+      var sedangDibuka =
+        (App.state.page === 'pesan' && App.pages.pesan &&
+         App.pages.pesan.divisi === dariDivisi) ||
+        (typeof Chat !== 'undefined' && Chat.terbuka && !dariDivisi);
+
+      try { if (typeof Bunyi !== 'undefined') Bunyi.nada(1320, 0.12); } catch (e) {}
+
+      if (sedangDibuka) return;
+
+      PesanMasuk.tampil(dariDivisi, jml || n);
+    }).catch(function () {});
+  },
+
+  gambarBadge: function () {
+    // Angka di samping menu = pekerjaan yang masih menunggu, bukan
+    // pemberitahuan yang belum dibaca. Begitu pekerjaannya selesai,
+    // angkanya turun sendiri.
+    var kerja = NotifCenter.kerja || {};
+
+    /*
+     * Angkanya digambar di dua tempat.
+     *
+     * Menu samping untuk layar lebar, menu bawah untuk HP. Keduanya
+     * membaca angka yang sama, jadi tidak mungkin berselisih.
+     */
+    document.querySelectorAll('#nav a, #tabbar a').forEach(function (a) {
+      var lama = a.querySelector('.nb');
+      if (lama) lama.remove();
+
+      var n = kerja[a.dataset.k];
+      if (!n) return;
+
+      var b = document.createElement('span');
+      b.className = 'nb';
+      b.textContent = n > 99 ? '99+' : n;
+      // Menu bawah punya gayanya sendiri di Styles; yang samping
+      // diatur di sini
+      if (!a.closest('#tabbar')) {
+        b.style.cssText = 'margin-left:auto;background:var(--danger);color:#fff;font-size:11px;' +
+          'font-weight:700;min-width:19px;height:19px;border-radius:99px;display:inline-flex;' +
+          'align-items:center;justify-content:center;padding:0 5px';
+      }
+
+      var ph = a.querySelector('.ph');
+      if (ph) ph.remove();
+      a.appendChild(b);
+    });
+
+  },
+
+  /** Hanya yang benar-benar baru yang dimunculkan, bukan seluruh daftar */
+  munculkanToast: function (list) {
+    if (NotifCenter.pertamaKali) {
+      (list || []).forEach(function (n) { NotifCenter.dikenal[n.notif_id] = 1; });
+      return;
+    }
+
+    var baru = (list || []).filter(function (n) { return !NotifCenter.dikenal[n.notif_id]; });
+    baru.slice(0, 3).forEach(function (n) {
+      NotifCenter.dikenal[n.notif_id] = 1;
+      toast(n.body, n.priority === 'HIGH' ? 'err' : 'ok', n.title);
+    });
+    if (baru.length > 3) {
+      toast('dan ' + (baru.length - 3) + ' pemberitahuan lain', '', 'Ada beberapa hal baru');
+    }
+    baru.forEach(function (n) { NotifCenter.dikenal[n.notif_id] = 1; });
+  },
+
+  terakhirSegar: 0,
+
+  /**
+   * Daftar di halaman yang sedang dibuka ikut menyegar sendiri.
+   *
+   * Dibatasi paling cepat 15 detik sekali. Saat toko ramai, perubahan
+   * bisa datang beruntun — dan memuat ulang daftar tiap kali justru
+   * membuat layar terasa berat, bukan terasa cepat.
+   */
+  segarkanHalaman: function () {
+    var k = App.state.page;
+    if (!k) return;
+
+    /*
+     * Layar yang sedang diisi tidak diganggu.
+     *
+     * Membuat pesanan, mengatur menu, mengisi pengaturan — semuanya
+     * punya isian yang belum tersimpan. Menyegarkannya berarti
+     * menghapus ketikan orang yang sedang bekerja.
+     *
+     * Layar satu transaksi juga dilewati: orangnya sedang membaca
+     * atau mengisi SN, dan daftar di belakangnya tidak terlihat
+     * olehnya.
+     */
+    var jangan = {
+      order: 1, notif: 1, setting: 1, users: 1, produk: 1,
+      qr: 1, etc: 1, menu: 1, pesan: 1
+    };
+    if (jangan[k]) return;
+    if (App.state.param) return;
+
+    var now = Date.now();
+    if (now - NotifCenter.terakhirSegar < 12000) return;
+    NotifCenter.terakhirSegar = now;
+
+    /*
+     * Tiap halaman menamai pemuatnya berbeda-beda — sisa dari cara
+     * membangunnya bertahap. Dicoba semuanya, supaya tidak ada
+     * halaman yang tertinggal hanya karena nama fungsinya lain.
+     */
+    var p = App.pages[k];
+    if (!p) return;
+
+    try {
+      if (typeof p.load === 'function') p.load();
+      else if (typeof p.muat === 'function') p.muat();
+      else if (typeof p.refresh === 'function') p.refresh();
+      else if (typeof p.cari === 'function') p.cari();
+    } catch (e) {}
+  },
+
+  /**
+   * Pemberitahuan untuk halaman yang sedang dibuka langsung ditandai
+   * dibaca. Kalau orangnya sudah melihat pekerjaannya, tidak masuk akal
+   * angka loncengnya tetap naik.
+   */
+  bacaHalaman: function (menu) {
+    var list = (NotifCenter.data && NotifCenter.data.list) || [];
+    var ids = list.filter(function (n) { return n.menu === menu; })
+                  .map(function (n) { return n.notif_id; });
+    if (!ids.length) return;
+    NotifCenter.tandaiDibaca(ids).catch(function () {});
+  },
+
+  tandaiDibaca: function (ids, semua) {
+    return api('apiMarkNotifRead', { notif_ids: ids || [], semua: !!semua })
+      .then(function (r) {
+        NotifCenter.data = r.notif;
+        NotifCenter.gambarBadge();
+        if (App.state.page === 'notif' && App.pages.notif) App.pages.notif.draw();
+        return r;
+      });
+  },
+
+  /*
+   * Lonceng di kepala layar sudah dibuang.
+   *
+   * Hampir tidak pernah dibuka: yang dicari orang bukan daftar
+   * kejadian, melainkan keadaan pesanannya sekarang — dan itu sudah
+   * terlihat di daftar masing-masing divisi, lengkap dengan siapa
+   * yang memegangnya.
+   *
+   * Yang tetap berjalan: angka pekerjaan di menu, alarm Gudang dan
+   * Teknisi, dan pemberitahuan pesan. Menu Pemberitahuan juga masih
+   * ada bagi yang ingin menelusuri.
+   */
+  pasangBel: function () {
+    var lama = document.getElementById('nc-bel');
+    if (lama && lama.parentNode) lama.parentNode.removeChild(lama);
+    NotifCenter.gambarBadge();
+  }
+};
+
+/* Lonceng dan badge dipasang ulang setiap kerangka layar digambar */
+(function () {
+  var asli = App.renderShell;
+  App.renderShell = function () {
+    asli.apply(App, arguments);
+    setTimeout(function () {
+      NotifCenter.pasangBel();
+      NotifCenter.gambarBadge();
+    }, 30);
+  };
+
+  var asliGo = App.go;
+  App.go = function (menu) {
+    asliGo.apply(App, arguments);
+    setTimeout(function () { NotifCenter.gambarBadge(); }, 30);
+  };
+
+  /*
+   * Penanda "sudah dibaca" TIDAK lagi dikirim setiap pindah halaman.
+   *
+   * Dari pengukuran: fungsi itu dipanggil 102 kali sehari dan ikut
+   * mengantre bersama penyimpanan transaksi. Orang yang sedang
+   * melayani customer menunggu giliran di belakang penanda notifikasi.
+   *
+   * Sekarang pemberitahuan ditandai dibaca saat halaman Pemberitahuan
+   * dibuka, atau saat tombolnya ditekan. Angka di samping menu sendiri
+   * sudah lama tidak bergantung pada ini — dia dihitung dari pekerjaan
+   * yang benar-benar menunggu.
+   */
+})();
+
+NotifCenter.mulai();
+
+/* ============================================================
+   HALAMAN PEMBERITAHUAN
+   ============================================================ */
+App.pages.notif = {
+  title: 'Pemberitahuan',
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<div class="between">' +
+          '<div><h3 class="mb0">Pemberitahuan untuk Anda</h3>' +
+            '<p class="hint mb0">Hilang sendiri setelah dibaca. Yang lama terhapus otomatis setelah tiga hari.</p></div>' +
+          '<button class="btn ghost" id="nf-semua">Tandai semua dibaca</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt16" id="nf-list"><div class="empty">Memuat…</div></div>';
+  },
+
+  mount: function () {
+    document.getElementById('nf-semua').onclick = function () {
+      var b = this;
+      btnBusy(b, true);
+      NotifCenter.tandaiDibaca([], true).then(function (r) {
+        btnBusy(b, false, 'Tandai semua dibaca');
+        toast(r.marked ? r.marked + ' pemberitahuan ditandai dibaca.' : 'Tidak ada yang perlu ditandai.', 'ok');
+      }).catch(function (e) {
+        btnBusy(b, false, 'Tandai semua dibaca');
+        toast(e.message, 'err');
+      });
+    };
+
+    api('apiMyNotifications', {}).then(function (d) {
+      NotifCenter.data = d;
+      NotifCenter.gambarBadge();
+      App.pages.notif.draw();
+    }).catch(function (e) {
+      document.getElementById('nf-list').innerHTML =
+        '<div class="empty"><b>Tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  },
+
+  draw: function () {
+    var list = (NotifCenter.data && NotifCenter.data.list) || [];
+    var box = document.getElementById('nf-list');
+    if (!box) return;
+
+    if (!list.length) {
+      box.innerHTML = '<div class="empty"><b>Tidak ada pemberitahuan baru</b>' +
+        'Semua sudah dibaca. Pemberitahuan muncul di sini begitu ada pekerjaan masuk.</div>';
+      return;
+    }
+
+    box.innerHTML = list.map(function (n) {
+      var warna = n.priority === 'HIGH' ? 'var(--danger)' : 'var(--brand)';
+      return '<div class="card" style="margin-bottom:10px;border-left:5px solid ' + warna + '">' +
+        '<div class="between">' +
+          '<div style="flex:1;min-width:200px">' +
+            '<b>' + Fmt.esc(n.title) + '</b>' +
+            (n.priority === 'HIGH' ? ' <span class="badge danger">penting</span>' : '') +
+            '<div>' + Fmt.esc(n.body) + '</div>' +
+            '<div class="small muted">' + Fmt.esc(Fmt.jam(n.at)) + '</div>' +
+          '</div>' +
+          '<div class="inline">' +
+            (n.trx_id
+              ? '<button class="btn sm nf-buka" data-id="' + Fmt.esc(n.notif_id) +
+                '" data-trx="' + Fmt.esc(n.trx_id) + '" data-menu="' + Fmt.esc(n.menu) +
+                '">Buka</button>' : '') +
+            '<button class="btn sm ghost nf-baca" data-id="' + Fmt.esc(n.notif_id) + '">Tandai dibaca</button>' +
+          '</div>' +
+        '</div></div>';
+    }).join('');
+
+    document.querySelectorAll('.nf-baca').forEach(function (b) {
+      b.onclick = function () {
+        btnBusy(b, true);
+        NotifCenter.tandaiDibaca([b.dataset.id]).catch(function (e) {
+          btnBusy(b, false, 'Tandai dibaca'); toast(e.message, 'err');
+        });
+      };
+    });
+
+    document.querySelectorAll('.nf-buka').forEach(function (b) {
+      b.onclick = function () {
+        NotifCenter.tandaiDibaca([b.dataset.id]).catch(function () {});
+        var menu = b.dataset.menu;
+        if (!menu || menu === 'home' || !App.pages[menu]) menu = null;
+        if (menu) App.go(menu, b.dataset.trx);
+        else toast('Menu untuk pemberitahuan ini belum tersedia.', 'err');
+      };
+    });
+  }
+};
+
+/* ============================================================
+   PEMBERITAHUAN PESAN MASUK
+
+   Kotak kecil di pojok yang muncul saat ada pesan baru, hilang
+   sendiri setelah beberapa detik, dan bisa ditutup sendiri.
+
+   Dibuat terpisah dari toast biasa karena isinya berbeda: ini
+   mengajak orang pindah ke layar lain, jadi perlu bisa diketuk
+   dan perlu bertahan cukup lama untuk dibaca.
+   ============================================================ */
+var PesanMasuk = {
+  simpul: null,
+  waktu: null,
+
+  tampil: function (divisi, jumlah) {
+    PesanMasuk.tutup();
+
+    var nama = (typeof Fmt !== 'undefined' && Fmt.roleLabel)
+      ? Fmt.roleLabel(divisi) : (divisi || 'divisi lain');
+
+    var d = document.createElement('div');
+    d.id = 'pesan-masuk';
+    d.innerHTML =
+      '<div style="display:flex;gap:10px;align-items:flex-start">' +
+        '<div style="font-size:20px;line-height:1">💬</div>' +
+        '<div style="flex:1;min-width:0">' +
+          '<b style="font-size:14px">' +
+            (jumlah > 1 ? jumlah + ' pesan baru' : 'Pesan baru') + '</b>' +
+          '<div class="small" style="opacity:.9">' +
+            (divisi ? 'Dari ' + Fmt.esc(nama) : 'Pada salah satu pesanan') +
+            ' · ketuk untuk membuka</div>' +
+        '</div>' +
+        '<button id="pesan-tutup" style="background:none;border:0;color:inherit;' +
+          'font-size:18px;line-height:1;cursor:pointer;padding:0 2px">×</button>' +
+      '</div>';
+
+    document.body.appendChild(d);
+    PesanMasuk.simpul = d;
+
+    d.onclick = function (e) {
+      if (e.target.id === 'pesan-tutup') { PesanMasuk.tutup(); return; }
+      PesanMasuk.tutup();
+      if (divisi && App.pages.pesan) App.pages.pesan.divisi = divisi;
+      App.go('pesan');
+    };
+
+    // Hilang sendiri, tapi cukup lama untuk sempat dibaca
+    PesanMasuk.waktu = setTimeout(PesanMasuk.tutup, 9000);
+  },
+
+  tutup: function () {
+    clearTimeout(PesanMasuk.waktu);
+    if (PesanMasuk.simpul && PesanMasuk.simpul.parentNode) {
+      PesanMasuk.simpul.parentNode.removeChild(PesanMasuk.simpul);
+    }
+    PesanMasuk.simpul = null;
+  }
+};
+</script>

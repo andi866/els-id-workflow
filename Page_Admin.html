@@ -1,0 +1,1307 @@
+<script>
+/* ============================================================
+   Halaman Admin — Monitoring, Resep, dan Nota
+
+   Tiga menu berbagi satu halaman detail:
+   - Monitoring : semua transaksi, bisa disaring
+   - Resep & Nota : yang sudah siap dibuatkan nota
+   - Approval Harga : yang diskonnya melewati batas
+
+   Cetak resep memakai fasilitas cetak browser. Data resep selalu
+   diambil ulang dari server saat tombol ditekan.
+   ============================================================ */
+
+/* ---------- gaya khusus cetak, dipasang sekali ---------- */
+var Cetak = {
+  siap: false,
+
+  pasangGaya: function (kertas) {
+    var ukuran = kertas === 'A4' ? 'A4' : (kertas === 'STRUK' ? '80mm auto' : 'A5');
+    bersihkanGayaCetak_();
+
+    var st = document.createElement('style');
+    st.id = 'gaya-cetak';
+    st.textContent =
+      '@media print {' +
+        '@page { size: ' + ukuran + '; margin: ' + (kertas === 'STRUK' ? '4mm' : '10mm') + '; }' +
+        'body > *:not(#cetak-area) { display: none !important; }' +
+        '#cetak-area { display: block !important; position: static !important; }' +
+        '#cetak-area * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }' +
+      '}' +
+      '#cetak-area { display: none; }';
+    document.head.appendChild(st);
+  },
+
+  jalankan: function (html, kertas) {
+    Cetak.pasangGaya(kertas);
+    var area = document.getElementById('cetak-area');
+    if (!area) {
+      area = document.createElement('div');
+      area.id = 'cetak-area';
+      document.body.appendChild(area);
+    }
+    area.innerHTML = html;
+
+    // Beri jeda sebentar supaya logo sempat termuat
+    setTimeout(function () {
+      try { window.print(); }
+      catch (e) { toast('Browser menolak membuka jendela cetak.', 'err'); }
+    }, 350);
+  },
+
+  /** Susunan resep. Lebar dan ukuran huruf menyesuaikan kertas. */
+  html: function (d) {
+    var t = d.header, k = d.toko;
+    var struk = k.kertas === 'STRUK';
+    var lebar = struk ? '72mm' : (k.kertas === 'A4' ? '190mm' : '128mm');
+    var font = struk ? '10px' : '12px';
+
+    var baris = d.items.map(function (i) {
+      var sn = i.sns.length
+        ? '<div style="font-size:.88em;color:#444;margin-top:2px">SN: ' +
+          i.sns.map(Fmt.esc).join(', ') + '</div>' : '';
+      var cat = i.item_note
+        ? '<div style="font-size:.88em;color:#444;font-style:italic">' + Fmt.esc(i.item_note) + '</div>' : '';
+      var potong = (i.master_price > i.unit_price)
+        ? '<div style="font-size:.85em;color:#666">Harga ' + Fmt.rp(i.master_price) +
+          ' − ' + Fmt.rp(i.master_price - i.unit_price) + '</div>' : '';
+
+      if (struk) {
+        return '<div style="padding:4px 0;border-bottom:1px dashed #bbb">' +
+          '<div style="font-weight:700">' + Fmt.esc(i.product_name) + '</div>' +
+          '<div style="display:flex;justify-content:space-between">' +
+            '<span>' + i.qty + ' x ' + Fmt.rp(i.unit_price) + '</span>' +
+            '<b>' + Fmt.rp(i.line_total) + '</b></div>' + potong + sn + cat + '</div>';
+      }
+
+      return '<tr>' +
+        '<td style="padding:5px 4px;border-bottom:1px solid #ddd;text-align:center">' + i.no + '</td>' +
+        '<td style="padding:5px 4px;border-bottom:1px solid #ddd">' +
+          '<b>' + Fmt.esc(i.product_name) + '</b>' +
+          '<div style="font-size:.85em;color:#666">' + Fmt.esc(i.product_code) + '</div>' +
+          sn + cat + '</td>' +
+        '<td style="padding:5px 4px;border-bottom:1px solid #ddd;text-align:center">' + i.qty + '</td>' +
+        '<td style="padding:5px 4px;border-bottom:1px solid #ddd;text-align:right">' +
+          Fmt.rp(i.unit_price) + potong + '</td>' +
+        '<td style="padding:5px 4px;border-bottom:1px solid #ddd;text-align:right;font-weight:700">' +
+          Fmt.rp(i.line_total) + '</td>' +
+      '</tr>';
+    }).join('');
+
+    var isi = struk
+      ? baris
+      : '<table style="width:100%;border-collapse:collapse;font-size:' + font + '">' +
+          '<thead><tr style="background:#f0f0f0">' +
+            '<th style="padding:6px 4px;text-align:center;width:28px;border-bottom:2px solid #333">No</th>' +
+            '<th style="padding:6px 4px;text-align:left;border-bottom:2px solid #333">Nama Barang</th>' +
+            '<th style="padding:6px 4px;text-align:center;width:40px;border-bottom:2px solid #333">Qty</th>' +
+            '<th style="padding:6px 4px;text-align:right;width:95px;border-bottom:2px solid #333">Harga</th>' +
+            '<th style="padding:6px 4px;text-align:right;width:100px;border-bottom:2px solid #333">Jumlah</th>' +
+          '</tr></thead><tbody>' + baris + '</tbody></table>';
+
+    return '' +
+      '<div style="width:' + lebar + ';margin:0 auto;font-family:Arial,Helvetica,sans-serif;' +
+        'font-size:' + font + ';color:#000;line-height:1.45">' +
+
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;' +
+          'border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:10px">' +
+          '<div style="display:flex;gap:10px;align-items:center">' +
+            (k.logo ? '<img src="' + Fmt.esc(k.logo) + '" style="height:' +
+              (struk ? '28px' : '42px') + '">' : '') +
+            '<div>' +
+              '<div style="font-size:' + (struk ? '13px' : '17px') + ';font-weight:800">' +
+                Fmt.esc(k.nama) + '</div>' +
+              (k.alamat ? '<div style="font-size:.88em">' + Fmt.esc(k.alamat) + '</div>' : '') +
+              (k.telepon ? '<div style="font-size:.88em">' + Fmt.esc(k.telepon) + '</div>' : '') +
+            '</div>' +
+          '</div>' +
+          (struk ? '' :
+          '<div style="text-align:right">' +
+            '<div style="font-size:14px;font-weight:800;letter-spacing:1px">RESEP BARANG</div>' +
+            '<div style="font-size:.9em">Dicetak ' + Fmt.esc(Fmt.jam(t.dicetak_pada)) + '</div>' +
+            (t.print_count > 1 ? '<div style="font-size:.85em;color:#a00">Cetakan ke-' +
+              t.print_count + '</div>' : '') +
+          '</div>') +
+        '</div>' +
+
+        (struk ? '<div style="text-align:center;font-weight:800;margin-bottom:6px">RESEP BARANG</div>' : '') +
+
+        '<table style="width:100%;font-size:' + font + ';margin-bottom:10px">' +
+          '<tr>' +
+            '<td style="width:50%;vertical-align:top">' +
+              '<div><b>No. Transaksi</b></div>' +
+              '<div style="font-size:1.05em;font-weight:800">' + Fmt.esc(t.trx_no) + '</div>' +
+              '<div style="margin-top:4px"><b>Tanggal</b> ' + Fmt.esc(t.trx_date) + '</div>' +
+              '<div><b>Sales</b> ' + Fmt.esc(t.sales_name || '—') +
+                (t.sales_code ? ' (' + Fmt.esc(t.sales_code) + ')' : '') + '</div>' +
+            '</td>' +
+            '<td style="width:50%;vertical-align:top">' +
+              '<div><b>Customer</b></div>' +
+              '<div style="font-weight:700">' + Fmt.esc(t.cust_name) + '</div>' +
+              '<div>' + Fmt.esc(t.cust_phone) + '</div>' +
+              (t.cust_member ? '<div>Member ' + Fmt.esc(t.cust_member) + '</div>' : '') +
+            '</td>' +
+          '</tr>' +
+        '</table>' +
+
+        isi +
+
+        '<table style="width:100%;font-size:' + font + ';margin-top:8px">' +
+          (t.discount_total > 0 ?
+            '<tr><td style="text-align:right;padding:2px 4px">Harga sebelum diskon</td>' +
+            '<td style="text-align:right;width:110px;padding:2px 4px">' +
+              Fmt.rp(t.subtotal + t.discount_total) + '</td></tr>' +
+            '<tr><td style="text-align:right;padding:2px 4px">Total diskon</td>' +
+            '<td style="text-align:right;padding:2px 4px">− ' + Fmt.rp(t.discount_total) + '</td></tr>' : '') +
+          '<tr style="font-size:1.15em;font-weight:800;border-top:2px solid #000">' +
+            '<td style="text-align:right;padding:5px 4px">TOTAL</td>' +
+            '<td style="text-align:right;padding:5px 4px">' + Fmt.rp(t.grand_total) + '</td></tr>' +
+          (t.paid_total > 0 ?
+            '<tr><td style="text-align:right;padding:2px 4px">Sudah dibayar</td>' +
+            '<td style="text-align:right;padding:2px 4px">' + Fmt.rp(t.paid_total) + '</td></tr>' +
+            '<tr style="font-weight:700"><td style="text-align:right;padding:2px 4px">Sisa</td>' +
+            '<td style="text-align:right;padding:2px 4px">' + Fmt.rp(t.outstanding) + '</td></tr>' : '') +
+        '</table>' +
+
+        (t.order_note ?
+          '<div style="margin-top:8px;padding:6px 8px;border:1px solid #bbb;font-size:.92em">' +
+          '<b>Keterangan:</b> ' + Fmt.esc(t.order_note) + '</div>' : '') +
+
+        '<div style="margin-top:10px;border:1px solid #000;padding:6px 8px">' +
+          '<b>No. Nota:</b> ' +
+          (t.nota_no ? '<span style="font-weight:800">' + Fmt.esc(t.nota_no) + '</span>'
+                     : '<span style="letter-spacing:2px">________________________</span>') +
+        '</div>' +
+
+        (struk ? '' :
+        '<table style="width:100%;margin-top:22px;font-size:' + font + ';text-align:center">' +
+          '<tr>' +
+            '<td>Gudang<div style="height:46px"></div>( ____________ )</td>' +
+            '<td>Admin<div style="height:46px"></div>( ____________ )</td>' +
+            '<td>Penerima<div style="height:46px"></div>( ____________ )</td>' +
+          '</tr>' +
+        '</table>') +
+
+        '<div style="margin-top:10px;font-size:.82em;color:#666;text-align:center">' +
+          'Dicetak oleh ' + Fmt.esc(t.dicetak_oleh) +
+          (t.print_count > 1 ? ' · cetakan ke-' + t.print_count : '') + '</div>' +
+      '</div>';
+  }
+};
+
+/* ============================================================
+   MONITORING
+   ============================================================ */
+App.pages.monitor = {
+  title: 'Monitoring',
+  s: { scope: 'aktif', hari: 7, q: '' },
+
+  html: function (param) {
+    if (param) return '<div id="ad-root"><div class="empty">Membuka transaksi…</div></div>';
+    return '' +
+      '<div class="grid c4" id="ad-stat"></div>' +
+      '<div class="card mt16">' +
+        '<div class="between">' +
+          '<div class="inline" id="ad-scope">' +
+            '<button class="btn sm" data-s="aktif">Masih berjalan</button>' +
+            '<button class="btn sm ghost" data-s="siap_nota">Siap nota</button>' +
+            '<button class="btn sm ghost" data-s="belum_lunas">Belum lunas</button>' +
+            '<button class="btn sm ghost" data-s="hari_ini">Hari ini</button>' +
+            '<button class="btn sm ghost" data-s="semua">Semua</button>' +
+          '</div>' +
+          '<div class="inline">' +
+            '<select id="ad-hari" style="width:auto">' +
+              '<option value="7">7 hari</option>' +
+              '<option value="30">30 hari</option>' +
+              '<option value="90">90 hari</option>' +
+              '<option value="0">Semua waktu</option>' +
+            '</select>' +
+            '<input type="text" id="ad-q" placeholder="Cari nomor / nama / nota" style="width:220px">' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt16" id="ad-list"><div class="empty"><b>Memuat<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div></div>';
+  },
+
+  mount: function (view, param) {
+    var P = App.pages.monitor;
+    if (param) { AdminDetail.buka(param, 'monitor'); return; }
+
+    document.getElementById('ad-scope').onclick = function (e) {
+      var b = e.target.closest('button[data-s]'); if (!b) return;
+      P.s.scope = b.dataset.s;
+      document.querySelectorAll('#ad-scope button').forEach(function (x) {
+        x.classList.toggle('ghost', x.dataset.s !== P.s.scope);
+      });
+      P.load();
+    };
+    document.getElementById('ad-hari').onchange = function () {
+      P.s.hari = Number(this.value); P.load();
+    };
+    document.getElementById('ad-q').oninput = debounce(function (e) {
+      P.s.q = e.target.value.trim(); P.load();
+    }, 300);
+
+    P.load();
+  },
+
+  load: function () {
+    var P = App.pages.monitor;
+    apiDaftar('apiAdminList', { scope: P.s.scope, hari: P.s.hari, q: P.s.q },
+      'monitor:' + P.s.scope + ':' + P.s.hari + ':' + P.s.q, function (d) {
+      var h = d.hitung || {};
+      document.getElementById('ad-stat').innerHTML =
+        '<div class="stat"><b style="color:var(--brand)">' +
+          ((h.MENUNGGU_GUDANG || 0) + (h.PROSES_GUDANG || 0)) + '</b><span>Di gudang</span></div>' +
+        '<div class="stat"><b style="color:var(--warn)">' + (h.SIAP_NOTA || 0) +
+          '</b><span>Siap dibuat nota</span></div>' +
+        '<div class="stat"><b style="color:var(--warn)">' + (h.MENUNGGU_PEMBAYARAN || 0) +
+          '</b><span>Menunggu pembayaran</span></div>' +
+        '<div class="stat"><b style="color:var(--ok)">' + (h.SELESAI || 0) +
+          '</b><span>Selesai</span></div>';
+
+      if (!d.list.length) {
+        document.getElementById('ad-list').innerHTML =
+          '<div class="empty"><b>Tidak ada transaksi</b>Coba ubah saringan atau rentang waktunya.</div>';
+        return;
+      }
+
+      document.getElementById('ad-list').innerHTML =
+        '<div class="table-wrap"><table><thead><tr>' +
+          '<th>Nomor</th><th>Customer</th><th>Sales</th><th>Status</th>' +
+          '<th>Bayar</th><th class="num">Total</th><th></th>' +
+        '</tr></thead><tbody>' +
+        d.list.map(function (t) {
+          return '<tr class="row-mark ' + Fmt.rowMark(t.stage_status) +
+            '" data-id="' + Fmt.esc(t.trx_id) + '">' +
+            '<td><b class="mono">' + Fmt.esc(t.trx_no) + '</b>' +
+              (t.nota_no ? '<div class="small muted">Nota ' + Fmt.esc(t.nota_no) + '</div>'
+                         : '<div class="small muted">' + Fmt.esc(t.trx_date) + '</div>') + '</td>' +
+            '<td>' + Fmt.esc(t.cust_name) +
+              '<div class="small muted">' + Fmt.esc(t.cust_phone) + '</div></td>' +
+            '<td class="small">' + Fmt.esc(t.sales_name || '—') + '</td>' +
+            '<td>' + Fmt.stageBadge(t.stage_status, t.stage_label) +
+              (t.tertahan ? ' <span class="badge danger">⏱ ' + t.menit + ' mnt</span>' : '') + '</td>' +
+            '<td>' + Fmt.payBadge(t.payment_status) + '</td>' +
+            '<td class="num mono">' + Fmt.rp(t.grand_total) + '</td>' +
+            '<td><button class="btn sm ghost">Buka</button></td></tr>';
+        }).join('') + '</tbody></table></div>';
+
+      document.getElementById('ad-list').onclick = function (e) {
+        var tr = e.target.closest('tr[data-id]'); if (!tr) return;
+        App.go('monitor', tr.dataset.id);
+      };
+    }).catch(function (e) {
+      document.getElementById('ad-list').innerHTML =
+        '<div class="empty"><b>Data tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  }
+};
+
+/* ============================================================
+   RESEP & NOTA — daftar yang siap dibuatkan nota
+   ============================================================ */
+App.pages.nota = {
+  title: 'Resep & Nota',
+
+  html: function (param) {
+    if (param) return '<div id="ad-root"><div class="empty">Membuka transaksi…</div></div>';
+    return '<div id="nt-list"><div class="empty"><b>Memuat<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div></div>';
+  },
+
+  /*
+   * Pemuat dipisah dari mount.
+   *
+   * Sebelumnya daftar dimuat di dalam mount, yang hanya berjalan sekali
+   * saat halaman dibuka. Akibatnya penyegaran otomatis tidak punya apa
+   * pun untuk dipanggil — transaksi yang sudah diberi nomor nota tetap
+   * berdiri di daftar sampai halamannya dimuat ulang manual.
+   */
+  mount: function (view, param) {
+    if (param) { AdminDetail.buka(param, 'nota'); return; }
+    App.pages.nota.load();
+  },
+
+  load: function () {
+    if (!document.getElementById('nt-list')) return;
+
+    apiDaftar('apiAdminList', { scope: 'siap_nota', hari: 30 }, 'nota', function (d) {
+      if (!d.list.length) {
+        document.getElementById('nt-list').innerHTML =
+          '<div class="empty"><b>Tidak ada yang menunggu</b>' +
+          'Transaksi muncul di sini setelah Gudang konfirmasi barang siap.</div>';
+        return;
+      }
+
+      document.getElementById('nt-list').innerHTML =
+        '<div class="card"><div class="between">' +
+          '<div><h3 class="mb0">' + d.list.length + ' transaksi menunggu nomor nota</h3>' +
+          '<p class="hint mb0">Barangnya sudah disiapkan Gudang, atau pesanan indent ' +
+          'yang notanya perlu diterbitkan lebih dulu.</p></div>' +
+        '</div></div>' +
+        d.list.map(function (t) {
+          /*
+           * Jenis notanya terlihat dari kartunya, tanpa perlu dibuka.
+           *
+           * Dua pekerjaan ini berbeda: yang indent menerbitkan nota
+           * pesanan sementara barangnya belum ada, yang biasa
+           * menerbitkan nota penjualan untuk barang yang sudah siap.
+           * Kalau keduanya tampak sama, Admin baru tahu setelah membuka —
+           * dan sudah terlanjur menyiapkan nomor yang salah.
+           */
+          var indent = t.stage_status === 'MENUNGGU_BARANG';
+
+          return '<div class="card mt16" style="border-left:5px solid ' +
+              (indent ? '#7c3aed' : (t.tertahan ? 'var(--danger)' : 'var(--warn)')) +
+              '" data-id="' + Fmt.esc(t.trx_id) + '">' +
+            '<div class="between">' +
+              '<div>' +
+                '<div class="inline" style="margin-bottom:4px">' +
+                  (indent
+                    ? '<span class="badge" style="background:#EDE7FD;color:#5B21B6">' +
+                      '📦 Siap nota indent</span>'
+                    : '<span class="badge warn">🧾 Siap nota</span>') +
+                  (t.tertahan ? '<span class="badge danger">⏱ ' + t.menit + ' menit</span>'
+                              : '<span class="badge">' + t.menit + ' menit lalu</span>') +
+                '</div>' +
+                '<div style="font-size:18px;font-weight:800" class="mono">' + Fmt.esc(t.trx_no) + '</div>' +
+                '<div style="font-size:15px">Atas nama <b>' + Fmt.esc(t.cust_name) + '</b></div>' +
+                '<div class="small muted">Sales ' + Fmt.esc(t.sales_name || '—') +
+                  ' · ' + t.item_count + ' item · ' + Fmt.rp(t.grand_total) + '</div>' +
+                (indent
+                  ? '<div class="small" style="color:#5B21B6">Barang belum datang — ' +
+                    'yang diterbitkan nota pesanan</div>' : '') +
+              '</div>' +
+              '<button class="btn lg">Buka</button>' +
+            '</div></div>';
+        }).join('');
+
+      document.getElementById('nt-list').onclick = function (e) {
+        var card = e.target.closest('[data-id]'); if (!card) return;
+        App.go('nota', card.dataset.id);
+      };
+    }).catch(function (e) {
+      document.getElementById('nt-list').innerHTML =
+        '<div class="empty"><b>Data tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  }
+};
+
+/* ============================================================
+   APPROVAL HARGA
+   ============================================================ */
+App.pages.approve = {
+  title: 'Approval Harga',
+
+  html: function (param) {
+    if (param) return '<div id="ad-root"><div class="empty">Membuka transaksi…</div></div>';
+    return '<div id="ap-list"><div class="empty"><b>Memuat<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div></div>';
+  },
+
+  mount: function (view, param) {
+    if (param) { AdminDetail.buka(param, 'approve'); return; }
+
+    api('apiAdminList', { scope: 'aktif', hari: 30 }).then(function (d) {
+      var perlu = d.list.filter(function (t) {
+        return ['SIAP_NOTA', 'MENUNGGU_GUDANG', 'PROSES_GUDANG'].indexOf(t.stage_status) >= 0;
+      });
+
+      if (!perlu.length) {
+        document.getElementById('ap-list').innerHTML =
+          '<div class="empty"><b>Tidak ada yang perlu ditinjau</b>' +
+          'Transaksi dengan diskon di atas batas akan muncul di sini.</div>';
+        return;
+      }
+
+      document.getElementById('ap-list').innerHTML =
+        '<div class="card"><h3>Transaksi berjalan</h3>' +
+        '<p class="hint mb0">Buka transaksi untuk melihat dan menyetujui harga yang melewati batas diskon. ' +
+        'Selama masih ada yang menunggu persetujuan, nomor nota belum bisa dibuat.</p></div>' +
+        '<div class="table-wrap mt16"><table><thead><tr>' +
+          '<th>Nomor</th><th>Customer</th><th>Sales</th><th>Status</th><th class="num">Total</th><th></th>' +
+        '</tr></thead><tbody>' +
+        perlu.map(function (t) {
+          return '<tr data-id="' + Fmt.esc(t.trx_id) + '">' +
+            '<td><b class="mono">' + Fmt.esc(t.trx_no) + '</b></td>' +
+            '<td>' + Fmt.esc(t.cust_name) + '</td>' +
+            '<td class="small">' + Fmt.esc(t.sales_name || '—') + '</td>' +
+            '<td>' + Fmt.stageBadge(t.stage_status, t.stage_label) + '</td>' +
+            '<td class="num mono">' + Fmt.rp(t.grand_total) + '</td>' +
+            '<td><button class="btn sm ghost">Tinjau</button></td></tr>';
+        }).join('') + '</tbody></table></div>';
+
+      document.getElementById('ap-list').onclick = function (e) {
+        var tr = e.target.closest('tr[data-id]'); if (!tr) return;
+        App.go('approve', tr.dataset.id);
+      };
+    }).catch(function (e) {
+      document.getElementById('ap-list').innerHTML =
+        '<div class="empty"><b>Data tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  }
+};
+
+/* ============================================================
+   DETAIL TRANSAKSI — dipakai ketiga menu di atas
+   ============================================================ */
+var AdminDetail = {
+  d: null,
+  asal: 'monitor',
+
+  /** Tanda halus bahwa yang terlihat sedang disegarkan */
+  tandaSegar: function () {
+    var el = document.getElementById('ad-root');
+    if (!el) return;
+    var t = document.createElement('div');
+    t.id = 'ad-segar';
+    t.style.cssText = 'position:fixed;right:18px;bottom:18px;background:#1F2733;color:#fff;' +
+      'padding:7px 13px;border-radius:20px;font-size:12.5px;z-index:60;opacity:.9';
+    t.textContent = 'Menyegarkan…';
+    var lama = document.getElementById('ad-segar');
+    if (lama) lama.remove();
+    document.body.appendChild(t);
+    setTimeout(function () { var x = document.getElementById('ad-segar'); if (x) x.remove(); }, 3000);
+  },
+
+  buka: function (trxId, asal) {
+    AdminDetail.asal = asal || 'monitor';
+    apiSimpan('apiAdminGetTrx', { trx_id: trxId }, 'admin:' + trxId,
+      function (d, dariSimpanan) {
+        AdminDetail.d = d;
+        AdminDetail.render();
+        if (dariSimpanan) AdminDetail.tandaSegar();
+      }
+    ).catch(function (e) {
+      document.getElementById('ad-root').innerHTML =
+        '<div class="empty"><b>Transaksi tidak bisa dibuka</b>' + Fmt.esc(e.message) +
+        '<div class="mt16"><button class="btn ghost" onclick="App.go(\'' +
+        AdminDetail.asal + '\')">Kembali</button></div></div>';
+    });
+  },
+
+  muatUlang: function () {
+    AdminDetail.buka(AdminDetail.d.header.trx_id, AdminDetail.asal);
+  },
+
+  render: function () {
+    var D = AdminDetail;
+    var d = D.d, h = d.header;
+    var menunggu = d.approval.filter(function (a) { return !a.disetujui; });
+
+    document.getElementById('ad-root').innerHTML =
+      '<div class="card">' +
+        '<div class="between">' +
+          '<div>' +
+            '<div style="font-size:22px;font-weight:800" class="mono">' + Fmt.esc(h.trx_no) + '</div>' +
+            '<div style="font-size:16px;margin-top:3px">' + Fmt.esc(h.cust_name) + '</div>' +
+            /*
+             * Email ikut ditampilkan kalau ada.
+             *
+             * Admin yang mengirim nota atau faktur membutuhkannya,
+             * dan tanpa ini dia harus membuka Data Customer di layar
+             * lain hanya untuk menyalin satu alamat.
+             */
+            '<div class="small muted">' + Fmt.esc(h.cust_phone) +
+              (h.cust_email ? ' · ' + Fmt.esc(h.cust_email) : '') +
+              ' · Sales ' + Fmt.esc(h.sales_name || '—') +
+              (h.sales_code ? ' (' + Fmt.esc(h.sales_code) + ')' : '') + '</div>' +
+          '</div>' +
+          '<div style="text-align:right">' +
+            '<div class="inline" style="justify-content:flex-end">' +
+              Fmt.stageBadge(h.stage_status, h.stage_label) + Fmt.payBadge(h.payment_status) + '</div>' +
+            '<div class="inline mt8" style="justify-content:flex-end">' +
+              (h.stage_status !== 'SELESAI'
+                ? '<button class="btn sm ghost" id="ad-cust">👤 Ganti customer</button>' : '') +
+              (['SIAP_NOTA', 'MENUNGGU_PEMBAYARAN', 'MENUNGGU_AKTIVASI',
+                'PROSES_AKTIVASI'].indexOf(h.stage_status) >= 0
+                ? '<button class="btn sm ghost" id="ad-ganti" ' +
+                  'style="color:var(--danger)">⚠ Unit rusak</button>' : '') +
+              (['MENUNGGU_GUDANG', 'PROSES_GUDANG', 'SIAP_NOTA'].indexOf(h.stage_status) >= 0
+                && !h.nota_no
+                ? '<button class="btn sm ghost" id="ad-indent">📦 Jadikan indent</button>' : '') +
+              (['SELESAI', 'DIBATALKAN'].indexOf(h.stage_status) < 0
+                ? '<button class="btn sm ghost" id="ad-batal" style="color:var(--danger)">' +
+                  'Batalkan pesanan</button>' : '') +
+              (App.pages.order && App.can('ITEM_ADD')
+                ? '<button class="btn sm" id="ad-edit">✏️ Edit pesanan</button>' : '') +
+              '<button class="btn ghost sm" id="ad-back">Kembali</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+        (h.order_note ?
+          '<div class="mt16" style="background:var(--warn-soft);padding:10px 12px;border-radius:10px">' +
+          '<b class="small" style="color:var(--warn)">Keterangan pesanan</b>' +
+          '<div>' + Fmt.esc(h.order_note) + '</div></div>' : '') +
+      '</div>' +
+
+      (menunggu.length ?
+      '<div class="card mt16" style="border-color:var(--danger);background:var(--danger-soft)">' +
+        '<h3 style="color:var(--danger)">🔖 ' + menunggu.length + ' harga menunggu persetujuan</h3>' +
+        '<p class="hint">Nomor nota belum bisa dibuat sampai semuanya ditinjau.</p>' +
+        menunggu.map(function (a) {
+          return '<div class="card" style="margin-bottom:9px">' +
+            '<div class="between">' +
+              '<div>' +
+                '<b>' + Fmt.esc(a.product_name) + '</b>' +
+                (a.basi ? ' <span class="badge warn">harga berubah setelah disetujui</span>' : '') +
+                '<div class="small muted">' + Fmt.esc(a.product_code) + ' · ' + a.qty + ' unit</div>' +
+                '<div class="small mt8">Harga master <span class="mono">' + Fmt.rp(a.master_price) +
+                  '</span> → dijual <b class="mono">' + Fmt.rp(a.unit_price) + '</b> ' +
+                  '<span class="badge danger">diskon ' + a.disc_pct + '%</span></div>' +
+              '</div>' +
+              '<button class="btn ad-approve" data-item="' + Fmt.esc(a.item_id) + '">Setujui</button>' +
+            '</div></div>';
+        }).join('') +
+      '</div>' : '') +
+
+      (d.approval.filter(function (a) { return a.disetujui; }).length ?
+      '<div class="card mt16">' +
+        '<h3>Harga yang sudah disetujui</h3>' +
+        d.approval.filter(function (a) { return a.disetujui; }).map(function (a) {
+          return '<div class="between" style="padding:7px 0;border-bottom:1px solid var(--line)">' +
+            '<div><b>' + Fmt.esc(a.product_name) + '</b>' +
+              '<div class="small muted">Diskon ' + a.disc_pct + '% · disetujui ' +
+              Fmt.esc(a.approved_by) + ' ' + Fmt.esc(Fmt.jamSaja(a.approved_at)) + '</div></div>' +
+            '<button class="btn sm ghost ad-unapprove" data-item="' + Fmt.esc(a.item_id) +
+              '">Batalkan</button></div>';
+        }).join('') +
+      '</div>' : '') +
+
+      /*
+       * Kotak nomor nota ditaruh di atas daftar barang.
+       *
+       * Itu pekerjaan utama Admin di layar ini, dan satu-satunya
+       * yang perlu diketik. Menaruhnya di bawah daftar barang
+       * berarti menggulir melewati sepuluh baris lebih dulu, tiap
+       * kali, sepanjang hari.
+       *
+       * Cetak resep dan ETC tetap di bawah — keduanya ditekan
+       * setelah isinya diperiksa, jadi urutannya memang begitu.
+       */
+      '<div class="card mt16">' +
+        /*
+         * Satu judul yang menerangkan dirinya sendiri.
+         *
+         * Keterangan jenisnya cukup di judul — label kedua di dalam
+         * kotaknya hanya mengulang hal yang sama dua baris di bawah,
+         * dan dua tulisan untuk satu kotak membuat orang mengira ada
+         * dua isian.
+         */
+        '<h3>Nomor nota' +
+          (d.bisaNotaIndent ? ' (indent)'
+           : (h.nota_indent ? ' penjualan' : '')) + '</h3>' +
+        (h.nota_indent && !d.bisaNotaIndent
+          ? '<div style="background:#EDE7FD;color:#5B21B6;padding:9px 12px;border-radius:9px;' +
+            'margin-bottom:12px"><b class="small">Nota pesanan: ' +
+            Fmt.esc(h.nota_indent) + '</b><div class="small">Sudah tersimpan dan tidak ' +
+            'akan berubah. Tarik nota ini dari customer, lalu terbitkan nota penjualan ' +
+            'di bawah.</div></div>'
+          : '') +
+        /*
+         * Satu kotak nota yang berganti isi.
+         *
+         * Pesanan indent mengisi nota pesanan (SO), pesanan biasa
+         * mengisi nota penjualan (JL). Dua kotak terpisah membuat Admin
+         * harus memilih dulu yang mana — padahal pada satu saat hanya
+         * ada satu yang berlaku.
+         */
+        /*
+         * Yang menentukan kotak mana yang muncul adalah TAHAP, bukan
+         * ada tidaknya nota pesanan.
+         *
+         * Dulu kotak nota pesanan tetap muncul selama nota penjualan
+         * belum ada — termasuk setelah barang indent datang dan Gudang
+         * selesai menyiapkan. Admin mengetik nomor JL di kotak itu, dan
+         * yang tertimpa justru nomor SO yang sudah diserahkan ke
+         * customer.
+         */
+        (d.bisaNotaIndent
+          ? '<div class="field mb0">' +
+              '<div class="inline">' +
+                '<input type="text" id="ad-notaind" value="' + Fmt.esc(h.nota_indent || '') +
+                  '" placeholder="ketik nomor dari nota pesanan" style="flex:1;min-width:220px">' +
+                '<button class="btn" id="ad-simpanind">' +
+                  (h.nota_indent ? 'Ubah nomor' : 'Simpan &amp; teruskan ke Kasir') + '</button>' +
+              '</div>' +
+              '<div class="note">Nota pesanan diterbitkan lebih dulu sebagai bukti, ' +
+                'sebelum barangnya datang. Contoh bentuknya: <span class="mono">' +
+                Fmt.esc(d.notaIndentContoh || 'SO-PWT-260919-0001') + '</span></div>' +
+              '<div class="note">' +
+                (h.nota_indent
+                  ? 'Dibuat ' + Fmt.esc(Fmt.jam(h.nota_indent_at)) +
+                    '. Customer bisa DP atau melunasi di Kasir. Nota penjualan JL-PWT ' +
+                    'dibuat nanti, setelah barangnya datang dan disiapkan Gudang.'
+                  : 'Setelah disimpan, transaksi masuk antrian Kasir dan customer ' +
+                    'bisa DP atau melunasi.') +
+              '</div>' +
+            '</div>'
+
+          : '<div class="field mb0">' +
+              '<div class="inline">' +
+                '<input type="text" id="ad-nota" value="' + Fmt.esc(h.nota_no) +
+                  '" placeholder="ketik nomor dari nota resmi" style="flex:1;min-width:220px"' +
+                  (d.bisaNota || h.nota_no ? '' : ' disabled') + '>' +
+                '<button class="btn" id="ad-savenota"' +
+                  (d.bisaNota || h.nota_no ? '' : ' disabled') + '>' +
+                  (h.nota_no ? 'Ubah nomor nota' : 'Simpan &amp; teruskan ke Kasir') + '</button>' +
+              '</div>' +
+              '<div class="note">' +
+                'Nomor diambil dari nota yang dibuat di website resmi kantor, lalu diketik di sini. ' +
+                'Contoh bentuknya: <span class="mono">' + Fmt.esc(d.notaContoh || '') + '</span>' +
+              '</div>' +
+              '<div class="note">' +
+                (h.nota_no
+                  ? 'Nota dicatat ' + Fmt.esc(Fmt.jam(h.nota_at)) + '. Mengubahnya tercatat di riwayat.'
+                  : (d.bisaNota
+                     ? 'Setelah disimpan, transaksi diteruskan sesuai status bayarnya — ' +
+                       'ke Kasir kalau belum lunas, langsung ke Teknisi kalau sudah.'
+                     : (menunggu.length
+                        ? 'Selesaikan persetujuan harga di atas dulu.'
+                        : 'Menunggu Gudang konfirmasi barang siap.'))) +
+              '</div>' +
+            '</div>') +
+      '</div>' +
+
+      '<div class="card mt16">' +
+        '<h3>Daftar barang</h3>' +
+        '<div class="mt16">' +
+          TabelBarang.render(d.items, {
+            harga: true, total: true, sn: true,
+            ringkas: {
+              subtotal: h.subtotal, diskon: h.discount_total,
+              grand: h.grand_total, terbayar: h.paid_total,
+              sisa: h.outstanding
+            }
+          }) +
+        '</div>' +
+        /*
+         * Satu baris pilihan, bukan satu tombol per barang.
+         *
+         * Pesanan enam barang dulu berarti enam tombol berderet di
+         * bawah tabel — memanjang, dan nama barangnya terpotong
+         * sehingga justru sulit dibedakan mana yang mana.
+         *
+         * Dengan daftar pilihan, nama barangnya tampil utuh dan
+         * tingginya tetap berapa pun jumlah barangnya.
+         */
+        (App.can('SN_INPUT')
+          ? '<div class="sep"></div>' +
+            '<label class="small" style="font-weight:600">Serial Number</label>' +
+            '<div class="inline" style="flex-wrap:nowrap;margin-top:5px">' +
+              '<select id="ad-pilihsn" style="flex:1;min-width:0">' +
+                d.items.map(function (i, n) {
+                  var adaSn = i.sns && i.sns.length;
+                  return '<option value="' + n + '">' +
+                    (adaSn ? '✓ ' : '(kosong) ') + Fmt.esc(i.product_name) + '</option>';
+                }).join('') +
+              '</select>' +
+              '<button class="btn sm ghost" id="ad-sn-go">Isi / koreksi</button>' +
+            '</div>' +
+            '<div class="note">Koreksi wajib diisi alasannya. SN lama tidak dihapus, ' +
+            'hanya dinonaktifkan, dan tercatat di riwayat.</div>'
+          : '') +
+      '</div>' +
+
+      /*
+       * Keterangan pesanan online.
+       *
+       * Admin perlu melihatnya SEBELUM menerbitkan nota: tempo
+       * menentukan apakah barang boleh jalan tanpa pembayaran, dan
+       * faktur pajak menentukan bentuk notanya di sistem kantor.
+       *
+       * Ditaruh di atas kotak nota supaya terbaca lebih dulu.
+       */
+      (String(h.channel) === 'ONLINE'
+        ? '<div class="card mt16" style="border-left:4px solid var(--brand)">' +
+          '<div class="between">' +
+            '<b>Keterangan pesanan online</b>' +
+            '<span class="badge brand">🌐 ' + Fmt.esc(h.sumber || 'Online') + '</span>' +
+          '</div>' +
+          '<div class="grid c2 mt16">' +
+            '<div class="between"><span class="muted">Pembayaran</span><b' +
+              (h.tempo_hari ? ' style="color:var(--warn)"' : '') + '>' +
+              (h.tempo_hari ? 'Tempo ' + h.tempo_hari + ' hari' : 'Tunai') + '</b></div>' +
+            '<div class="between"><span class="muted">Faktur pajak</span><b' +
+              (h.faktur_pajak ? ' style="color:var(--warn)"' : '') + '>' +
+              (h.faktur_pajak ? 'Diminta customer' : 'Tidak') + '</b></div>' +
+            '<div class="between"><span class="muted">Cara serah</span><b>' +
+              Fmt.esc(h.metode_serah || '—') + '</b></div>' +
+            '<div class="between"><span class="muted">Diambil di</span><b>' +
+              Fmt.esc(h.gedung || '—') + '</b></div>' +
+            (h.dp_info
+              ? '<div class="between"><span class="muted">DP masuk</span><b class="mono">' +
+                Fmt.rp(h.dp_info) + '</b></div>' : '') +
+            (h.tempo_jatuh
+              ? '<div class="between"><span class="muted">Jatuh tempo</span><b>' +
+                Fmt.esc(h.tempo_jatuh) + '</b></div>' : '') +
+          '</div>' +
+          (h.tempo_hari && !h.tempo_jatuh
+            ? '<div class="small mt16" style="color:var(--warn)">Setelah nota terbit, ' +
+              'Kasir yang menyetujui temponya — barang baru boleh jalan setelah itu.</div>'
+            : '') +
+          '</div>'
+        : '') +
+
+      '<div class="card mt16">' +
+        '<h3>Cetak resep &amp; formulir</h3>' +
+        '<p class="hint">Resep bisa dicetak kapan saja sejak pesanan dikonfirmasi. ' +
+          'Datanya diambil ulang saat tombol ditekan, jadi selalu yang terbaru.</p>' +
+
+        '<div class="inline">' +
+          '<button class="btn ghost" id="ad-print">🖨 Cetak resep</button>' +
+          '<button class="btn ghost" id="ad-etc">🖨 Cetak Formulir ETC</button>' +
+          (h.print_count ? '<span class="small muted">resep sudah dicetak ' + h.print_count +
+            'x · terakhir ' + Fmt.esc(Fmt.jamSaja(h.last_print_at)) + '</span>' : '') +
+        '</div>' +
+        '<div class="note">Formulir ELS Total Care dicetak di kertas A5, terpisah dari resep. ' +
+          'Isinya bisa diperiksa dan dibetulkan dulu sebelum dicetak.</div>' +
+
+      '</div>' +
+
+      '<div class="card mt16">' +
+        '<div class="between">' +
+          '<h3 class="mb0">Riwayat perjalanan transaksi</h3>' +
+          (d.timeline ? '' : '<button class="btn sm ghost" id="ad-riwayat">Tampilkan</button>') +
+        '</div>' +
+        '<div id="ad-timeline">' +
+          (d.timeline ? AdminDetail.timelineHtml(d.timeline)
+                      : '<div class="small muted mt8">Riwayat dimuat saat dibuka, ' +
+                        'supaya membuka transaksi tetap cepat.</div>') +
+        '</div>' +
+      '</div>';
+
+    /*
+     * Percakapan divisi, menempel di bawah layarnya.
+     *
+     * Ditaruh di akhir supaya tidak mendorong tombol kerja ke
+     * bawah — yang dibuka orang pertama kali tetap pekerjaannya.
+     */
+    try {
+      var akarCh = document.getElementById('ad-root');
+      if (akarCh && typeof Chat !== 'undefined') {
+        akarCh.insertAdjacentHTML('beforeend', '<div id="chat-box"></div>');
+        Chat.pasang(AdminDetail.d.header.trx_id, 'chat-box');
+      }
+    } catch (eCh) {}
+
+    D.bind();
+  },
+
+  /*
+   * Riwayat digambar terpisah karena dimuat belakangan.
+   *
+   * Sheet riwayat tumbuh paling cepat di antara semuanya, dan
+   * membacanya pada tiap pembukaan transaksi membuat semua orang
+   * membayar ongkos itu — termasuk yang tidak pernah menggulir
+   * sampai ke bawah.
+   */
+  timelineHtml: function (list) {
+    if (!list || !list.length) {
+      return '<div class="small muted mt8">Belum ada riwayat.</div>';
+    }
+    return '<div style="border-left:2px solid var(--line);margin-left:6px;' +
+      'padding-left:16px;margin-top:10px">' +
+      list.map(function (t) {
+        return '<div style="padding:8px 0;position:relative">' +
+          '<div style="position:absolute;left:-22px;top:13px;width:9px;height:9px;' +
+            'border-radius:50%;background:var(--brand)"></div>' +
+          '<div class="small muted">' + Fmt.esc(Fmt.jam(t.at)) + '</div>' +
+          '<div>' + Fmt.esc(t.label) + '</div>' +
+          (t.detail ? '<div class="small muted">' + Fmt.esc(t.detail) + '</div>' : '') +
+        '</div>';
+      }).join('') + '</div>';
+  },
+
+  muatRiwayat: function (trxId, tombol) {
+    if (tombol) btnBusy(tombol, true, 'Memuat');
+    api('apiTrxTimeline', { trx_id: trxId }).then(function (r) {
+      var el = document.getElementById('ad-timeline');
+      if (el) el.innerHTML = AdminDetail.timelineHtml(r.list);
+      if (tombol) tombol.remove();
+    }).catch(function (e) {
+      if (tombol) btnBusy(tombol, false, 'Tampilkan');
+      toast(e.message, 'err');
+    });
+  },
+
+  bind: function () {
+    var D = AdminDetail;
+    var d = D.d, h = d.header;
+
+    document.getElementById('ad-back').onclick = function () { App.go(D.asal); };
+
+    var rw = document.getElementById('ad-riwayat');
+    if (rw) rw.onclick = function () { AdminDetail.muatRiwayat(h.trx_id, rw); };
+
+    /*
+     * Admin membuka pesanan di layar yang sama dengan Sales.
+     *
+     * Dulu Admin hanya bisa melihat. Padahal justru Admin yang paling
+     * sering menerima koreksi dari customer di depan meja — harga
+     * keliru, jumlah salah, barang tertukar — dan kalau tidak bisa
+     * membetulkan sendiri, dia harus mencari salesnya dulu.
+     */
+    /*
+     * Membatalkan pesanan yang dibatalkan customer.
+     *
+     * Tanpa ini pesanan menggantung selamanya di antrian Resep & Nota,
+     * dan lama-lama antriannya penuh hal yang tidak perlu dikerjakan
+     * siapa pun.
+     */
+    var ab = document.getElementById('ad-batal');
+    if (ab) ab.onclick = function () {
+      Modal.open({
+        title: 'Batalkan pesanan ini?',
+        sub: 'Pesanan keluar dari semua antrian. Datanya tetap tersimpan beserta ' +
+             'alasannya, dan serial number yang sudah diisi dikembalikan supaya ' +
+             'barangnya bisa dijual lagi.',
+        okText: 'Ya, batalkan pesanan', danger: true,
+        body:
+          '<div class="between"><span class="muted">Nomor</span><b class="mono">' +
+            Fmt.esc(h.trx_no) + '</b></div>' +
+          '<div class="between mt8"><span class="muted">Customer</span><b>' +
+            Fmt.esc(h.cust_name) + '</b></div>' +
+          '<div class="between mt8"><span class="muted">Total</span><b class="mono">' +
+            Fmt.rp(h.grand_total) + '</b></div>' +
+          (h.paid_total > 0
+            ? '<div class="mt16" style="background:var(--danger-soft);padding:11px 13px;' +
+              'border-radius:10px;color:var(--danger)"><b>Sudah menerima pembayaran ' +
+              Fmt.rp(h.paid_total) + '.</b> Batalkan pembayarannya dulu lewat Riwayat Bayar.</div>'
+            : '') +
+          (h.nota_no
+            ? '<div class="mt16" style="background:var(--warn-soft);padding:11px 13px;' +
+              'border-radius:10px"><b class="small" style="color:var(--warn)">Nota ' +
+              Fmt.esc(h.nota_no) + ' sudah terbit</b><div class="small">Batalkan juga ' +
+              'notanya di sistem kantor, supaya angkanya tidak berbeda.</div></div>'
+            : '') +
+          '<div class="field mt16 mb0"><label>Alasan pembatalan</label>' +
+            '<input type="text" id="ad-batalalasan" ' +
+            'placeholder="contoh: customer batal, unitnya tidak jadi diambil"></div>',
+        onOk: function (close, btn) {
+          var el = document.getElementById('ad-batalalasan');
+          var alasan = el ? el.value.trim() : '';
+          if (alasan.length < 4) return toast('Isi alasannya dulu.', 'err');
+
+          btnBusy(btn, true, 'Membatalkan');
+          api('apiBatalkanTransaksi', { trx_id: h.trx_id, reason: alasan, idem: uid() })
+            .then(function (r) {
+              close();
+              toast(r.pesan, 'ok', 'Pesanan dibatalkan');
+              App.go(D.asal);
+            }).catch(function (e) {
+              btnBusy(btn, false, 'Ya, batalkan pesanan');
+              toast(e.message, 'err');
+            });
+        }
+      });
+    };
+
+    /*
+     * Mengganti customer yang salah dipilih.
+     *
+     * Sales kadang salah memilih nama dan baru ketahuan setelah
+     * pesanan diteruskan. Tanpa ini, satu-satunya jalan adalah
+     * membatalkan lalu membuat ulang — nomor berubah, riwayat
+     * terputus, dan nota yang sudah terbit jadi tidak cocok.
+     */
+    var ac = document.getElementById('ad-cust');
+    if (ac) ac.onclick = function () {
+      Modal.open({
+        title: 'Ganti customer pesanan ini',
+        sub: 'Cari nama, nomor WhatsApp, kode member, atau email. ' +
+             'Divisi yang sedang memegang pesanan akan diberi tahu.',
+        okText: 'Tutup', cancel: false,
+        body:
+          '<div class="between"><span class="muted">Sekarang</span><b>' +
+            Fmt.esc(h.cust_name) + '</b></div>' +
+          '<div class="field mt16 mb0">' +
+            '<input type="text" id="ad-caricust" autocomplete="off" ' +
+            'placeholder="Ketik nama, nomor WA, atau kode member">' +
+            '<div id="ad-custres"></div>' +
+          '</div>',
+
+        onMount: function () {
+          var kotak = document.getElementById('ad-caricust');
+          var box = document.getElementById('ad-custres');
+
+          var cari = function () {
+            var v = kotak.value.trim();
+            if (v.length < 2) { box.innerHTML = ''; return; }
+
+            api('apiSearchCustomer', { q: v }).then(function (rows) {
+              if (!rows.length) {
+                box.innerHTML = '<div class="small muted mt8">Tidak ditemukan.</div>';
+                return;
+              }
+              box.innerHTML = '<div class="table-wrap mt8"><table><tbody>' +
+                rows.slice(0, 6).map(function (c) {
+                  return '<tr data-id="' + Fmt.esc(c.customer_id) + '" style="cursor:pointer">' +
+                    '<td><b>' + Fmt.esc(c.full_name) + '</b>' +
+                      (c.member_code
+                        ? ' <span class="badge brand mono">' + Fmt.esc(c.member_code) + '</span>' : '') +
+                      '<div class="small muted">' + Fmt.esc(c.phone) + '</div></td>' +
+                    '<td style="width:80px"><button class="btn sm">Pilih</button></td></tr>';
+                }).join('') + '</tbody></table></div>';
+
+              box.onclick = function (e) {
+                var tr = e.target.closest('tr[data-id]'); if (!tr) return;
+                var c = rows.filter(function (x) {
+                  return String(x.customer_id) === String(tr.dataset.id);
+                })[0];
+                if (!c) return;
+
+                Modal.confirm('Ganti customer jadi ' + c.full_name + '?',
+                  'Nama lama ' + h.cust_name + ' akan diganti. Perubahan tercatat di ' +
+                  'riwayat, dan divisi yang sedang memegang pesanan diberi tahu.',
+                  'Ya, ganti', function () {
+                    api('apiSetTrxCustomer', {
+                      trx_id: h.trx_id, revision: h.revision,
+                      customer_id: c.customer_id, idem: uid()
+                    }).then(function () {
+                      toast('Customer diganti jadi ' + c.full_name + '.', 'ok');
+                      D.muatUlang();
+                    }).catch(function (e2) { toast(e2.message, 'err'); });
+                  });
+              };
+            }).catch(function (e3) { toast(e3.message, 'err'); });
+          };
+
+          kotak.oninput = debounce(cari, 220);
+          kotak.onkeydown = function (e) { if (e.key === 'Enter') { e.preventDefault(); cari(); } };
+          setTimeout(function () { kotak.focus(); }, 80);
+        }
+      });
+    };
+
+    /*
+     * Unit rusak yang ketahuan sebelum sampai Teknisi.
+     *
+     * Sering unitnya dicek Sales sambil Admin menyiapkan nota, dan
+     * baru di situ ketahuan rusak. Tanpa jalan ini, Admin terpaksa
+     * menghapus barangnya lalu menambahkannya lagi — SN lama tetap
+     * tercatat keluar gudang, catatan Gudang tidak cocok dengan
+     * barang yang benar-benar turun, dan tidak ada jejak kenapa
+     * unitnya berganti.
+     */
+    var ag = document.getElementById('ad-ganti');
+    if (ag) ag.onclick = function () {
+      var items = (d.items || []).filter(function (x) { return !x.voided; });
+      if (!items.length) return toast('Tidak ada barang di pesanan ini.', 'err');
+
+      Modal.open({
+        title: 'Unit rusak, minta ganti ke Gudang',
+        sub: 'Gudang langsung diberi tahu dengan alarm untuk menurunkan unit ' +
+             'pengganti dan mengisi SN barunya. Total dan pembayaran tidak berubah — ' +
+             'yang berganti hanya unitnya.',
+        okText: 'Kirim permintaan', danger: true,
+        body:
+          '<div class="field"><label>Barang mana yang rusak</label>' +
+            '<select id="ad-gbarang">' +
+            items.map(function (i, n) {
+              return '<option value="' + n + '">' + Fmt.esc(i.product_name) +
+                (i.qty > 1 ? ' (' + i.qty + ' unit)' : '') + '</option>';
+            }).join('') + '</select></div>' +
+
+          '<div class="field" id="ad-gunitbox"></div>' +
+
+          '<div class="field mb0"><label>Apa yang rusak atau tidak sesuai</label>' +
+            '<input type="text" id="ad-galasan" ' +
+            'placeholder="contoh: layar bergaris saat dinyalakan"></div>',
+
+        onMount: function () {
+          var sel = document.getElementById('ad-gbarang');
+          var box = document.getElementById('ad-gunitbox');
+
+          var gambarUnit = function () {
+            var i = items[Number(sel.value)];
+            if (!i || i.qty <= 1) {
+              box.innerHTML = (i && i.sns && i.sns[0])
+                ? '<label>SN yang ditarik</label><input type="text" value="' +
+                  Fmt.esc(i.sns[0]) + '" disabled>'
+                : '';
+              return;
+            }
+            var opt = '';
+            for (var u = 1; u <= i.qty; u++) {
+              opt += '<option value="' + u + '">Unit ' + u +
+                (i.sns && i.sns[u - 1] ? ' — SN ' + Fmt.esc(i.sns[u - 1]) : '') + '</option>';
+            }
+            box.innerHTML = '<label>Unit keberapa yang rusak</label>' +
+              '<select id="ad-gunit">' + opt + '</select>';
+          };
+
+          sel.onchange = gambarUnit;
+          gambarUnit();
+        },
+
+        onOk: function (close, btn) {
+          var sel = document.getElementById('ad-gbarang');
+          var i = items[Number(sel.value)];
+          var el = document.getElementById('ad-galasan');
+          var alasan = el ? el.value.trim() : '';
+          if (alasan.length < 4) return toast('Isi dulu apa yang rusak.', 'err');
+
+          var su = document.getElementById('ad-gunit');
+          btnBusy(btn, true, 'Mengirim');
+
+          api('apiMintaGanti', {
+            trx_id: h.trx_id, item_id: i.item_id,
+            unit_seq: su ? Number(su.value) : 1,
+            alasan: alasan, idem: uid()
+          }).then(function (r) {
+            close();
+            toast(r.pesan, 'ok', '⚠ Gudang sudah diberi tahu');
+            D.muatUlang();
+          }).catch(function (e) {
+            btnBusy(btn, false, 'Kirim permintaan');
+            toast(e.message, 'err');
+          });
+        }
+      });
+    };
+
+    var ai = document.getElementById('ad-indent');
+    if (ai) ai.onclick = function () {
+      Modal.open({
+        title: 'Pindahkan ke pesanan indent?',
+        sub: 'Pesanan ditarik dari antrian dan menunggu barangnya datang. ' +
+             'Nomor transaksi dan riwayatnya tetap. Setelah ini nomor nota pesanan ' +
+             'bisa diisi dan customer boleh DP atau lunas.',
+        okText: 'Ya, jadikan indent',
+        body:
+          '<div class="between"><span class="muted">Nomor</span><b class="mono">' +
+            Fmt.esc(h.trx_no) + '</b></div>' +
+          '<div class="between mt8"><span class="muted">Customer</span><b>' +
+            Fmt.esc(h.cust_name) + '</b></div>' +
+          '<div class="field mt16 mb0"><label>Keterangan (boleh dikosongkan)</label>' +
+            '<input type="text" id="ad-indentalasan" ' +
+            'placeholder="contoh: dipesan dari cabang Solo"></div>',
+        onOk: function (close, btn) {
+          var el = document.getElementById('ad-indentalasan');
+          var alasan = el ? el.value.trim() : '';
+
+          btnBusy(btn, true, 'Menyimpan');
+          api('apiJadikanIndent', { trx_id: h.trx_id, reason: alasan, idem: uid() })
+            .then(function (r) {
+              close();
+              toast(r.trx_no + ' dipindah ke Menunggu Barang.', 'ok', '📦 Jadi indent');
+              App.go('indent');
+            }).catch(function (e) {
+              btnBusy(btn, false, 'Ya, jadikan indent');
+              toast(e.message, 'err');
+            });
+        }
+      });
+    };
+
+    var ed = document.getElementById('ad-edit');
+    if (ed) ed.onclick = function () {
+      if (h.nota_no) {
+        Modal.confirm('Nomor nota sudah dibuat',
+          'Nota ' + h.nota_no + ' sudah terbit. Perubahan setelah ini tidak ikut ' +
+          'mengubah nota yang sudah tercetak, dan semuanya tercatat di riwayat. Tetap lanjutkan?',
+          'Ya, buka untuk diedit', function () { App.go('order', h.trx_id); });
+        return;
+      }
+      App.go('order', h.trx_id);
+    };
+
+    document.querySelectorAll('.ad-approve').forEach(function (b) {
+      b.onclick = function () {
+        var a = d.approval.filter(function (x) { return x.item_id === b.dataset.item; })[0];
+        Modal.open({
+          title: 'Setujui harga ' + a.product_name + '?',
+          sub: 'Diskon ' + a.disc_pct + '% melewati batas ' +
+               'Rp' + Number(a.master_price - a.unit_price).toLocaleString('id-ID') +
+               ' di bawah harga master.',
+          okText: 'Setujui harga',
+          body: '<div class="field mb0"><label>Alasan</label>' +
+                '<input type="text" id="ap-reason" placeholder="contoh: nego customer, disetujui lisan"></div>',
+          onOk: function (close, btn) {
+            btnBusy(btn, true);
+            api('apiApprovePrice', {
+              trx_id: h.trx_id, item_id: a.item_id, setuju: true,
+              reason: document.getElementById('ap-reason').value
+            }).then(function (baru) {
+              close(); D.d = baru; D.render();
+              toast('Harga disetujui.', 'ok');
+            }).catch(function (e) {
+              btnBusy(btn, false, 'Setujui harga');
+              toast(e.message, 'err');
+            });
+          }
+        });
+      };
+    });
+
+    document.querySelectorAll('.ad-unapprove').forEach(function (b) {
+      b.onclick = function () {
+        Modal.confirm('Batalkan persetujuan?',
+          'Nomor nota tidak bisa dibuat sampai harganya disetujui ulang atau dikembalikan.',
+          'Batalkan', function () {
+            api('apiApprovePrice', { trx_id: h.trx_id, item_id: b.dataset.item, setuju: false })
+              .then(function (baru) { D.d = baru; D.render(); toast('Persetujuan dibatalkan.', 'ok'); })
+              .catch(function (e) { toast(e.message, 'err'); });
+          }, true);
+      };
+    });
+
+    var adSnGo = document.getElementById('ad-sn-go');
+    if (adSnGo) adSnGo.onclick = function () {
+        var selSn = document.getElementById('ad-pilihsn');
+        var i = d.items[Number(selSn.value)];
+        if (!i) return;
+
+        var kotak = '';
+        for (var u = 0; u < i.qty; u++) {
+          kotak += '<div style="display:flex;align-items:center;gap:9px;margin-bottom:7px">' +
+            '<span class="small muted" style="width:52px;flex-shrink:0">Unit ' + (u + 1) + '</span>' +
+            '<input type="text" class="ad-snbox mono" data-seq="' + u + '" value="' +
+              Fmt.esc((i.sns && i.sns[u]) || '') + '" placeholder="kosongkan kalau tidak ada">' +
+          '</div>';
+        }
+
+        Modal.open({
+          title: 'Serial Number ' + i.product_name,
+          sub: 'SN lama tidak dihapus, hanya dinonaktifkan beserta alasannya. Riwayatnya tetap bisa ditelusuri.',
+          okText: 'Simpan koreksi',
+          body: kotak +
+            '<div class="field mt16 mb0"><label>Alasan koreksi</label>' +
+            '<input type="text" id="ad-snreason" placeholder="contoh: SN tertukar dengan unit lain"></div>',
+          onOk: function (close, btn) {
+            var sns = [];
+            document.querySelectorAll('.ad-snbox').forEach(function (k) {
+              sns[Number(k.dataset.seq)] = k.value.trim().toUpperCase();
+            });
+            var alasan = document.getElementById('ad-snreason').value.trim();
+            if (alasan.length < 4) return toast('Alasan koreksi wajib diisi.', 'err');
+
+            btnBusy(btn, true);
+            api('apiKoreksiSn', {
+              trx_id: h.trx_id, item_id: i.item_id, sns: sns, reason: alasan
+            }).then(function (baru) {
+              close(); D.d = baru; D.render();
+              toast('Serial Number diperbarui.', 'ok');
+            }).catch(function (e) {
+              btnBusy(btn, false, 'Simpan koreksi');
+              toast(e.message, 'err');
+            });
+          }
+        });
+    };
+
+    var etc = document.getElementById('ad-etc');
+    if (etc) etc.onclick = function () { EtcPrint.buka(h.trx_id, etc); };
+
+    var pr = document.getElementById('ad-print');
+    if (pr) pr.onclick = function () {
+      Resep.ambilLaluCetak(h.trx_id, pr, '🖨 Cetak resep')
+        .then(function () { setTimeout(function () { D.muatUlang(); }, 1500); })
+        .catch(function () {});
+    };
+
+    var si = document.getElementById('ad-simpanind');
+    if (si) si.onclick = function () {
+      var nomor = document.getElementById('ad-notaind').value.trim();
+      if (nomor.length < 3) return toast('Nomor nota pesanan belum diisi.', 'err');
+
+      var ubah = !!h.nota_indent;
+      Modal.open({
+        title: ubah ? 'Ubah nomor nota pesanan?' : 'Simpan nota pesanan indent?',
+        sub: ubah ? 'Perubahan tercatat di riwayat.'
+                  : 'Setelah disimpan, transaksi masuk antrian Kasir dan customer ' +
+                    'bisa DP atau melunasi.',
+        okText: ubah ? 'Ubah nomor' : 'Simpan & teruskan',
+        body:
+          '<div class="between"><span class="muted">Transaksi</span><b class="mono">' +
+            Fmt.esc(h.trx_no) + '</b></div>' +
+          '<div class="between mt8"><span class="muted">Nota pesanan</span><b class="mono">' +
+            Fmt.esc(nomor) + '</b></div>' +
+          '<div class="between mt8"><span class="muted">Total</span><b class="mono">' +
+            Fmt.rp(h.grand_total) + '</b></div>',
+        onOk: function (close, btn) {
+          close();
+          toast(ubah ? 'Nomor nota pesanan diperbarui.'
+                     : 'Nota pesanan ' + nomor + ' disimpan.', 'ok');
+          App.go(D.asal === 'nota' ? 'nota' : 'monitor');
+
+          Latar.simpan('apiSaveNotaIndent', {
+            trx_id: h.trx_id, nota_indent: nomor, idem: uid()
+          }, {
+            judul: 'Nota pesanan ' + nomor + ' (' + h.trx_no + ')',
+            keterangan: 'Buka lagi transaksinya dan isikan nomor nota pesanannya.',
+            berhasil: function () {
+              toast('Customer bisa bayar di Kasir.', 'ok', '✓ Nota pesanan tersimpan');
+              if (App.pages[App.state.page] && App.pages[App.state.page].load) {
+                App.pages[App.state.page].load();
+              }
+            },
+            ulangi: function () { App.go('monitor', h.trx_id); }
+          }).catch(function () {});
+          return;
+        },
+
+      });
+    };
+
+    var sn = document.getElementById('ad-savenota');
+    if (sn) sn.onclick = function () {
+      var nomor = document.getElementById('ad-nota').value.trim();
+      if (!nomor) return toast('Nomor nota belum diisi.', 'err');
+      if (nomor.length < 6) return toast('Nomor nota terlihat terlalu pendek. Cek ulang.', 'err');
+
+      var ubah = !!h.nota_no;
+      Modal.open({
+        title: ubah ? 'Ubah nomor nota?' : 'Simpan nomor nota?',
+        sub: ubah
+          ? 'Nomor lama ' + h.nota_no + ' akan diganti. Perubahan tercatat di riwayat.'
+          : 'Setelah disimpan, transaksi langsung masuk antrian Kasir.',
+        okText: ubah ? 'Ubah nomor' : 'Simpan & teruskan',
+        body:
+          '<div class="between"><span class="muted">Transaksi</span><b class="mono">' +
+            Fmt.esc(h.trx_no) + '</b></div>' +
+          '<div class="between mt8"><span class="muted">Nomor nota</span><b class="mono">' +
+            Fmt.esc(nomor) + '</b></div>' +
+          '<div class="between mt8"><span class="muted">Total</span><b class="mono">' +
+            Fmt.rp(h.grand_total) + '</b></div>' +
+          (ubah ? '<div class="field mt16 mb0"><label>Alasan perubahan</label>' +
+            '<input type="text" id="nt-reason" placeholder="contoh: salah ketik"></div>' : ''),
+        onOk: function (close, btn) {
+          var alasan = document.getElementById('nt-reason');
+          var muatan = {
+            trx_id: h.trx_id, revision: h.revision, nota_no: nomor,
+            reason: alasan ? alasan.value : '', idem: uid()
+          };
+
+          /*
+           * Layar berpindah dulu, penyimpanan menyusul.
+           *
+           * Nomornya sudah terbit di sistem kantor sebelum diketik di
+           * sini — menunggu penyimpanan tidak membuatnya lebih sah.
+           * Yang penting kalau gagal, Admin diberi tahu dengan jelas
+           * beserta nomor transaksinya.
+           */
+          close();
+          toast(ubah ? 'Nomor nota diperbarui.' : 'Nota ' + nomor + ' disimpan.', 'ok');
+          App.go(D.asal === 'nota' ? 'nota' : 'monitor');
+
+          Latar.simpan('apiSaveNota', muatan, {
+            judul: 'Nota ' + nomor + ' (' + h.trx_no + ')',
+            keterangan: 'Buka lagi transaksinya di Resep & Nota, lalu isikan ' +
+                        'nomor notanya sekali lagi.',
+            berhasil: function (r) {
+              toast(h.trx_no + ' diteruskan ' +
+                (r && r.lunas ? 'ke Teknisi — sudah lunas.' : 'ke Kasir.'),
+                'ok', '✓ Nota tersimpan');
+              if (App.pages[App.state.page] && App.pages[App.state.page].load) {
+                App.pages[App.state.page].load();
+              }
+            },
+            ulangi: function () { App.go('monitor', h.trx_id); }
+          }).catch(function () {});
+        }
+      });
+    };
+  }
+};
+</script>

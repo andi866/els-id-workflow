@@ -1,0 +1,73 @@
+<script>
+/* ============================================================
+   Halaman Audit Log
+   Phase 1 menampilkan 80 catatan terakhir. Filter lengkap
+   (tanggal, pelaku, jenis perubahan) menyusul di Phase 9,
+   saat jumlah datanya sudah banyak.
+   ============================================================ */
+App.pages.audit = {
+  title: 'Riwayat Perubahan',
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<div class="between">' +
+          '<div><h3>80 catatan terakhir</h3>' +
+            '<p class="hint mb0">Catatan hanya bisa ditambah, tidak bisa diubah atau dihapus — ' +
+              'termasuk oleh Super Admin.</p></div>' +
+          '<button class="btn ghost" id="a-refresh">Muat ulang</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt16" id="a-list"><div class="empty">Memuat data…</div></div>';
+  },
+
+  mount: function () {
+    document.getElementById('a-refresh').onclick = App.pages.audit.load;
+    App.pages.audit.load();
+  },
+
+  load: function () {
+    api('apiRecentAudit', {}).then(function (rows) {
+      if (!rows.length) {
+        document.getElementById('a-list').innerHTML =
+          '<div class="empty"><b>Belum ada catatan</b>Catatan muncul setelah ada login atau perubahan data.</div>';
+        return;
+      }
+
+      var actLabel = {
+        LOGIN: 'Masuk', LOGOUT: 'Keluar', LOGIN_FAIL: 'Gagal masuk',
+        CREATE: 'Menambah', UPDATE: 'Mengubah', VOID: 'Membatalkan',
+        STAGE_CHANGE: 'Memindahkan tahap', OVERRIDE: 'Melewati aturan'
+      };
+      var actClass = { LOGIN_FAIL: 'danger', VOID: 'danger', OVERRIDE: 'warn', CREATE: 'ok' };
+
+      var body = rows.map(function (r) {
+        var perubahan = r.field
+          ? Fmt.esc(r.field) + ': <span class="muted">' + Fmt.esc(r.old_value || '—') + '</span> → <b>' +
+            Fmt.esc(r.new_value || '—') + '</b>'
+          : Fmt.esc(r.new_value || '—');
+
+        return '<tr>' +
+          '<td class="small muted" style="white-space:nowrap">' + Fmt.esc(Fmt.jam(r.at)) + '</td>' +
+          '<td><b>' + Fmt.esc(r.actor) + '</b><div class="small muted">' +
+            Fmt.esc(Fmt.roleLabel(r.role)) + '</div></td>' +
+          '<td><span class="badge ' + (actClass[r.action] || '') + '">' +
+            Fmt.esc(actLabel[r.action] || r.action) + '</span></td>' +
+          '<td class="small">' + Fmt.esc(r.entity) + ' ' + Fmt.esc(r.entity_id || '') + '</td>' +
+          '<td class="small">' + perubahan + '</td>' +
+          '<td class="small muted">' + Fmt.esc(r.reason || '') + '</td>' +
+        '</tr>';
+      }).join('');
+
+      document.getElementById('a-list').innerHTML =
+        '<div class="table-wrap"><table><thead><tr>' +
+          '<th>Waktu</th><th>Pelaku</th><th>Tindakan</th><th>Objek</th><th>Perubahan</th><th>Alasan</th>' +
+        '</tr></thead><tbody>' + body + '</tbody></table></div>';
+
+    }).catch(function (e) {
+      document.getElementById('a-list').innerHTML =
+        '<div class="empty"><b>Data tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  }
+};
+</script>

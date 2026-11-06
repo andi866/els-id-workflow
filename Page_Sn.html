@@ -1,0 +1,195 @@
+<script>
+/* ============================================================
+   Kelola Serial Number
+
+   Untuk satu kejadian yang cukup sering: Gudang salah tembak SN,
+   dan akibatnya baru terasa berhari-hari kemudian saat barangnya
+   benar-benar terjual — SN-nya ditolak karena dianggap sudah keluar.
+
+   Sebelum ada layar ini, membetulkannya berarti membuka sheet
+   langsung. Itu berisiko: salah hapus satu baris di sheet lain
+   akibatnya jauh lebih besar daripada masalah yang diperbaiki.
+   ============================================================ */
+App.pages.sn = {
+  title: 'Kelola Serial Number',
+  hasil: [],
+  bisaHapus: false,
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<h3>Cari serial number</h3>' +
+        '<p class="hint">Ketik serial numbernya, atau kode barangnya. ' +
+        'Minimal 3 huruf.</p>' +
+        '<div class="inline">' +
+          '<input type="text" id="sn-q" class="mono" style="flex:1;min-width:220px" ' +
+            'placeholder="contoh: NXJSBSN0055470B21A3400" autocomplete="off">' +
+          '<button class="btn" id="sn-cari">Cari</button>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="card mt16" style="background:var(--paper)">' +
+        '<b class="small">Kapan dipakai</b>' +
+        '<div class="small muted">Serial number yang salah tembak dan sekarang ' +
+        'menghalangi barangnya dijual. Setelah dibebaskan, SN-nya langsung bisa ' +
+        'ditembak lagi di transaksi baru.</div>' +
+      '</div>' +
+
+      '<div class="mt16" id="sn-hasil"></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.sn;
+    var kotak = document.getElementById('sn-q');
+
+    document.getElementById('sn-cari').onclick = function () { P.cari(); };
+    kotak.onkeydown = function (e) { if (e.key === 'Enter') P.cari(); };
+    kotak.focus();
+  },
+
+  cari: function () {
+    var P = App.pages.sn;
+    var q = document.getElementById('sn-q').value.trim();
+    var wadah = document.getElementById('sn-hasil');
+
+    if (q.length < 3) {
+      wadah.innerHTML = '<div class="empty">Ketik minimal 3 huruf atau angka.</div>';
+      return;
+    }
+
+    wadah.innerHTML = '<div class="empty">Mencari…</div>';
+
+    api('apiCariSn', { q: q }).then(function (d) {
+      P.hasil = d.list;
+      P.bisaHapus = d.bisaHapus;
+
+      if (!d.list.length) {
+        wadah.innerHTML =
+          '<div class="empty"><b>Tidak ditemukan</b>' +
+          'Serial number ini belum pernah tercatat. Kalau barangnya tetap ditolak ' +
+          'saat ditembak, kemungkinan ejaannya berbeda — coba sebagian saja.</div>';
+        return;
+      }
+
+      wadah.innerHTML =
+        '<div class="card"><div class="between">' +
+          '<b>' + d.total + ' baris ditemukan</b>' +
+          '<div class="inline">' +
+            '<button class="btn sm ghost" id="sn-semua">Pilih semua yang aktif</button>' +
+            '<button class="btn sm" id="sn-bebas">Bebaskan yang dipilih</button>' +
+            (d.bisaHapus
+              ? '<button class="btn sm ghost" id="sn-hapus" style="color:var(--danger)">' +
+                'Hapus permanen</button>' : '') +
+          '</div>' +
+        '</div></div>' +
+
+        '<div class="table-wrap mt16"><table><thead><tr>' +
+          '<th style="width:38px"></th><th>Serial Number</th><th>Dipakai di</th>' +
+          '<th>Keadaan</th><th>Dicatat</th>' +
+        '</tr></thead><tbody>' +
+        d.list.map(function (r, n) {
+          return '<tr class="row-mark ' + (r.aktif ? 'off' : 'on') + '">' +
+            '<td>' + (r.aktif
+              ? '<input type="checkbox" class="sn-pilih" data-n="' + n + '" style="width:auto">'
+              : '') + '</td>' +
+            '<td><b class="mono">' + Fmt.esc(r.serial_number) + '</b>' +
+              '<div class="small muted">' + Fmt.esc(r.product_code) +
+              ' · unit ' + r.unit_seq + '</div></td>' +
+            '<td>' + (r.trx_no
+                ? '<b class="mono small">' + Fmt.esc(r.trx_no) + '</b>' +
+                  '<div class="small muted">' + Fmt.esc(r.cust_name) +
+                  (r.trx_date ? ' · ' + Fmt.esc(r.trx_date) : '') + '</div>' +
+                  (r.stage_label ? '<div class="small muted">' +
+                    Fmt.esc(r.stage_label) + '</div>' : '')
+                : '<span class="muted small">—</span>') + '</td>' +
+            '<td>' + (r.aktif
+              ? '<span class="badge danger">Masih terpakai</span>'
+              : '<span class="badge ok">Sudah bebas</span>') +
+              (r.alasan ? '<div class="small muted">' + Fmt.esc(r.alasan) + '</div>' : '') +
+            '</td>' +
+            '<td class="small muted">' + Fmt.esc(Fmt.jam(r.input_at)) + '</td>' +
+          '</tr>';
+        }).join('') + '</tbody></table></div>' +
+
+        '<p class="hint mt8">Baris merah berarti SN masih dianggap terpakai dan akan ' +
+        'ditolak kalau ditembak lagi. Baris hijau sudah bebas.</p>';
+
+      P.bind();
+
+    }).catch(function (e) {
+      wadah.innerHTML = '<div class="empty"><b>Gagal mencari</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  },
+
+  bind: function () {
+    var P = App.pages.sn;
+
+    document.getElementById('sn-semua').onclick = function () {
+      document.querySelectorAll('.sn-pilih').forEach(function (c) { c.checked = true; });
+    };
+
+    document.getElementById('sn-bebas').onclick = function () { P.jalankan('bebas'); };
+
+    var hp = document.getElementById('sn-hapus');
+    if (hp) hp.onclick = function () { P.jalankan('hapus'); };
+  },
+
+  jalankan: function (mode) {
+    var P = App.pages.sn;
+    var pilih = [];
+
+    document.querySelectorAll('.sn-pilih').forEach(function (c) {
+      if (c.checked) pilih.push(P.hasil[Number(c.dataset.n)]);
+    });
+
+    if (!pilih.length) return toast('Centang dulu serial number yang mau diurus.', 'err');
+
+    var hapus = mode === 'hapus';
+
+    Modal.open({
+      title: hapus ? 'Hapus permanen?' : 'Bebaskan serial number?',
+      sub: hapus
+        ? 'Barisnya dihapus sepenuhnya dari database. Pakai ini hanya untuk isian ' +
+          'yang memang tidak pernah ada barangnya — misalnya angka asal seperti "10".'
+        : 'SN langsung bisa ditembak lagi di transaksi baru. Barisnya tetap tersimpan ' +
+          'beserta alasannya, jadi riwayatnya masih bisa ditelusuri.',
+      okText: hapus ? 'Ya, hapus permanen' : 'Ya, bebaskan',
+      danger: hapus,
+      body:
+        '<b class="small">' + pilih.length + ' serial number:</b>' +
+        '<div style="max-height:170px;overflow:auto;margin-top:7px">' +
+          pilih.map(function (r) {
+            return '<div class="small mono" style="padding:4px 0;border-bottom:1px solid var(--line)">' +
+              Fmt.esc(r.serial_number) +
+              (r.trx_no ? ' <span class="muted">· ' + Fmt.esc(r.trx_no) + '</span>' : '') +
+              '</div>';
+          }).join('') +
+        '</div>' +
+        '<div class="field mt16 mb0"><label>Alasan</label>' +
+          '<input type="text" id="sn-alasan" ' +
+          'placeholder="contoh: salah tembak, barangnya tidak pernah keluar"></div>',
+
+      onOk: function (close, btn) {
+        var el = document.getElementById('sn-alasan');
+        var alasan = el ? el.value.trim() : '';
+        if (alasan.length < 4) return toast('Isi alasannya dulu.', 'err');
+
+        btnBusy(btn, true, 'Memproses');
+        api('apiBebaskanSn', {
+          sn_ids: pilih.map(function (r) { return r.sn_id; }),
+          alasan: alasan, mode: mode, idem: uid()
+        }).then(function (r) {
+          close();
+          toast(r.jumlah + ' serial number ' +
+            (r.mode === 'hapus' ? 'dihapus' : 'dibebaskan') +
+            '. Sekarang bisa ditembak lagi.', 'ok', '✓ Selesai');
+          P.cari();
+        }).catch(function (e) {
+          btnBusy(btn, false, hapus ? 'Ya, hapus permanen' : 'Ya, bebaskan');
+          toast(e.message, 'err');
+        });
+      }
+    });
+  }
+};
+</script>

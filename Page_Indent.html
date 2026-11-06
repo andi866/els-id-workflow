@@ -1,0 +1,251 @@
+<script>
+/* ============================================================
+   Menunggu Barang — pesanan indent
+
+   Pesanan yang barangnya belum ada duduk di sini, bukan di antrian
+   Gudang. Gudang tidak diberi tahu dan alarmnya tidak berbunyi,
+   sampai ada yang menandai barangnya sudah datang.
+
+   Sebelumnya pesanan indent tetap masuk antrian Gudang. Alarmnya
+   berbunyi terus padahal Gudang tidak bisa berbuat apa-apa — dan
+   yang terlihat justru Gudang tidak merespons.
+   ============================================================ */
+App.pages.indent = {
+  title: 'Menunggu Barang',
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<div class="between">' +
+          '<div><h3 class="mb0">Pesanan menunggu barang datang</h3>' +
+          '<p class="hint mb0" id="in-ket">Belum masuk antrian Gudang. ' +
+          'Tekan tombolnya begitu barangnya tiba.</p></div>' +
+          '<button class="btn sm ghost" id="in-refresh">Muat ulang</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt16" id="in-list"><div class="empty"><b>Memuat<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div></div>';
+  },
+
+  mount: function () {
+    document.getElementById('in-refresh').onclick = function () { App.pages.indent.load(); };
+    App.pages.indent.load();
+  },
+
+  load: function () {
+    if (!document.getElementById('in-list')) return;
+    apiDaftar('apiIndentList', {}, 'indent', function (d) {
+      var ket = document.getElementById('in-ket');
+      if (ket) {
+        ket.innerHTML = 'Belum masuk antrian Gudang. Tekan tombolnya begitu barangnya tiba.' +
+          (d.belumNota
+            ? ' <b style="color:var(--warn)">' + d.belumNota +
+              ' di antaranya menunggu nota pesanan — diisi Admin lewat menu Resep &amp; Nota.</b>'
+            : '');
+      }
+
+      if (!d.list.length) {
+        document.getElementById('in-list').innerHTML =
+          '<div class="empty"><b>Tidak ada pesanan indent</b>' +
+          'Pesanan muncul di sini kalau Sales menandainya sebagai indent saat konfirmasi.</div>';
+        return;
+      }
+
+      document.getElementById('in-list').innerHTML = d.list.map(function (t) {
+        var lama = t.hari >= 3;
+        var belumNota = !t.nota_indent;
+
+        return '<div class="card" style="margin-bottom:12px;border-left:5px solid ' +
+            (belumNota ? 'var(--warn)' : (lama ? 'var(--danger)' : '#7c3aed')) + '">' +
+          '<div class="between">' +
+            '<div>' +
+              '<div class="inline" style="margin-bottom:4px">' +
+                '<span class="badge" style="background:#EDE7FD;color:#5B21B6">📦 Menunggu barang</span>' +
+                  (belumNota
+                  ? '<span class="badge warn">menunggu nota pesanan dari Admin</span>'
+                  : '<span class="badge ok">🧾 ' + Fmt.esc(t.nota_indent) + '</span>') +
+                (t.nota_indent ? Fmt.payBadge(t.payment_status) : '') +
+                (lama
+                  ? '<span class="badge danger">sudah ' + t.hari + ' hari</span>'
+                  : '<span class="badge">' + (t.hari ? t.hari + ' hari' : 'hari ini') + '</span>') +
+              '</div>' +
+              '<div style="font-size:18px;font-weight:800">' + Fmt.esc(t.cust_name) + '</div>' +
+              '<div class="small muted mono">' + Fmt.esc(t.trx_no) + '</div>' +
+              '<div class="small muted">Sales ' + Fmt.esc(t.sales_name || '—') +
+                (t.penyiap ? ' · Disiapkan <b>' + Fmt.esc(t.penyiap) + '</b>' : '') +
+                ' · ' + t.item_count + ' item · ' + Fmt.rp(t.grand_total) + '</div>' +
+
+              /*
+               * Siapa yang mengambil pesanannya.
+               *
+               * Ini yang ditanyakan Sales saat customer menagih
+               * kabar — dan selama ini jawabannya harus dicari
+               * dengan bertanya ke orang satu per satu.
+               */
+              (t.penyiap ? ''
+                : '<div class="small" style="color:var(--warn);font-weight:600">' +
+                  'Belum diambil siapa pun</div>') +
+
+              /*
+               * Penanda saluran, berguna untuk Super Admin yang
+               * melihat pesanan kedua divisi dalam satu daftar.
+               */
+              (String(t.channel) === 'ONLINE'
+                ? '<div class="inline mt8">' +
+                  '<span class="badge brand">🌐 Online' +
+                    (t.sumber ? ' · ' + Fmt.esc(t.sumber) : '') + '</span>' +
+                  (t.metode_serah
+                    ? '<span class="badge">' + Fmt.esc(t.metode_serah) + '</span>' : '') +
+                  '</div>'
+                : '') +
+              (t.catatan
+                ? '<div class="small mt8" style="background:#EDE7FD;color:#5B21B6;' +
+                  'padding:7px 10px;border-radius:8px">' + Fmt.esc(t.catatan) + '</div>' : '') +
+              (t.nota_indent && t.paid_total > 0
+                ? '<div class="small mt8">Sudah dibayar <b class="mono">' +
+                  Fmt.rp(t.paid_total) + '</b>' +
+                  (t.outstanding > 0 ? ' · sisa <b class="mono">' + Fmt.rp(t.outstanding) +
+                    '</b>' : ' · lunas') + '</div>'
+                : '') +
+            '</div>' +
+            '<div style="display:flex;flex-direction:column;gap:8px;min-width:170px">' +
+              '<button class="btn in-datang" data-id="' + Fmt.esc(t.trx_id) +
+                '" data-nama="' + Fmt.esc(t.cust_name) + '">Barang sudah datang</button>' +
+              '<button class="btn ghost sm in-resep" data-id="' + Fmt.esc(t.trx_id) +
+                '">🖨 Cetak resep</button>' +
+
+              /*
+               * Isi pesanannya bisa dibuka dari sini.
+               *
+               * Pesanan indent menunggu berhari-hari, dan selama itu
+               * sering ditanyakan isinya apa. Tanpa tombol ini,
+               * jawabannya harus dicari lewat menu lain — atau tidak
+               * ketemu sama sekali karena tahapnya bukan penyiapan.
+               */
+              '<button class="btn ghost sm in-lihat" data-id="' + Fmt.esc(t.trx_id) +
+                '">Lihat isi pesanan</button>' +
+
+              /*
+               * Pesanan yang barangnya sudah diambil tanpa lewat sistem.
+               *
+               * Kejadiannya: barang datang, customer kebetulan sedang di
+               * toko, langsung dibawa tanpa ada yang mencatat. Di sini
+               * pesanannya berdiri terus — kadang berbulan-bulan, ikut
+               * terhitung sebagai pekerjaan, dan menghalangi pengarsipan.
+               */
+              (App.can('NOTA_INPUT')
+                ? '<button class="btn ghost sm in-tutup" data-id="' + Fmt.esc(t.trx_id) +
+                  '" data-nama="' + Fmt.esc(t.cust_name) +
+                  '" data-no="' + Fmt.esc(t.trx_no) +
+                  '" style="color:var(--muted)">Sudah diambil di luar sistem</button>' : '') +
+            '</div>' +
+          '</div></div>';
+      }).join('');
+
+      document.querySelectorAll('.in-datang').forEach(function (b) {
+        b.onclick = function () { App.pages.indent.tandai(b); };
+      });
+
+      // Resep pesanan indent tetap bisa dicetak, dan tercetak dengan
+      // tanda bahwa barangnya belum ada
+      document.querySelectorAll('.in-tutup').forEach(function (b) {
+        b.onclick = function () {
+          Modal.open({
+            title: 'Tutup pesanan ini tanpa lewat sistem?',
+            sub: 'Dipakai kalau barangnya sudah diambil customer tapi tidak ada ' +
+                 'yang mencatatnya di aplikasi. Pesanan ditandai selesai dan ' +
+                 'diserahkan, lengkap dengan keterangan Anda.',
+            okText: 'Ya, tutup pesanan', danger: true,
+            body:
+              '<div class="between"><span class="muted">Transaksi</span><b class="mono">' +
+                Fmt.esc(b.dataset.no) + '</b></div>' +
+              '<div class="between mt8"><span class="muted">Customer</span><b>' +
+                Fmt.esc(b.dataset.nama) + '</b></div>' +
+              '<div class="field mt16 mb0"><label>Apa yang terjadi</label>' +
+                '<input type="text" id="in-tutupnote" ' +
+                'placeholder="contoh: barang diambil customer 2 Oktober, tidak sempat dicatat">' +
+                '<div class="note">Keterangan ini satu-satunya penjelasan kenapa ' +
+                'pesanan ini selesai tanpa melewati Gudang dan Teknisi.</div></div>',
+            onOk: function (close, btn) {
+              var el = document.getElementById('in-tutupnote');
+              var alasan = el ? el.value.trim() : '';
+              if (alasan.length < 5) return toast('Tulis dulu apa yang terjadi.', 'err');
+
+              btnBusy(btn, true, 'Menutup');
+              api('apiTutupIndentManual', {
+                trx_id: b.dataset.id, alasan: alasan, idem: uid()
+              }).then(function (r) {
+                close();
+                toast(r.trx_no + ' ditutup. Tercatat di Riwayat Perubahan.',
+                      'ok', 'Pesanan selesai');
+                App.pages.indent.load();
+              }).catch(function (e) {
+                btnBusy(btn, false, 'Ya, tutup pesanan');
+                toast(e.message, 'err');
+              });
+            }
+          });
+        };
+      });
+
+      document.querySelectorAll('.in-lihat').forEach(function (b) {
+      b.onclick = function () {
+        var peran = App.state.session.role;
+
+        /*
+         * Dibuka lewat layar yang sesuai perannya.
+         *
+         * Divisi penyiap memakai layar antrian dalam bentuk
+         * baca-saja; Sales memakai layar pesanannya sendiri.
+         */
+        if (peran === 'EKSEKUSI' || peran === 'GUDANG') {
+          App.pages.done.lihat(b.dataset.id, 'indent');
+        } else {
+          App.bukaDari('order', b.dataset.id, 'indent');
+        }
+      };
+    });
+
+    document.querySelectorAll('.in-resep').forEach(function (b) {
+        b.onclick = function () {
+          Resep.ambilLaluCetak(b.dataset.id, b, '🖨 Cetak resep').catch(function () {});
+        };
+      });
+    }).catch(function (e) {
+      document.getElementById('in-list').innerHTML =
+        '<div class="empty"><b>Data tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  },
+
+  tandai: function (b) {
+    Modal.open({
+      title: 'Barang sudah datang?',
+      sub: 'Setelah ini pesanan masuk antrian Gudang dan alarmnya berbunyi, ' +
+           'seperti pesanan biasa.',
+      okText: 'Ya, teruskan ke Gudang',
+      body:
+        '<div class="between"><span class="muted">Customer</span><b>' +
+          Fmt.esc(b.dataset.nama) + '</b></div>' +
+        '<div class="field mt16 mb0"><label>Catatan</label>' +
+          '<input type="text" id="in-catatan" placeholder="opsional, contoh: dikirim dari cabang Solo"></div>',
+      onOk: function (close, btn) {
+        var el = document.getElementById('in-catatan');
+
+        // Layar berpindah dulu, penyimpanan menyusul
+        close();
+        toast('Diteruskan ke Gudang…', 'ok', 'Barang datang');
+
+        Latar.simpan('apiBarangDatang', {
+          trx_id: b.dataset.id, catatan: el ? el.value : '', idem: uid()
+        }, {
+          judul: 'Barang datang ' + b.dataset.nama,
+          keterangan: 'Buka lagi di Menunggu Barang, lalu tekan Barang sudah datang.',
+          berhasil: function (r) {
+            toast(r.trx_no + ' masuk antrian Gudang.', 'ok', '✓ Diteruskan');
+            App.pages.indent.load();
+          }
+        }).catch(function () {});
+      }
+    });
+  }
+};
+</script>

@@ -1,0 +1,635 @@
+<script>
+/* ============================================================
+   Formulir ELS Total Care — cetak isian saja
+
+   Kertas formulirnya sudah tercetak duluan: judul, garis, keterangan,
+   kolom tanda tangan, semuanya sudah ada. Yang dikerjakan di sini
+   hanya menaruh ISINYA di posisi yang tepat.
+
+   Jadi yang keluar dari printer adalah kertas kosong berisi beberapa
+   baris tulisan — yang jatuh pas di atas garis isian formulir.
+
+   Karena posisinya tidak bisa ditebak dari layar, koordinatnya bisa
+   disetel sendiri lewat tombol Atur posisi, dan ada lembar kalibrasi
+   bergaris ukur untuk membacanya.
+   ============================================================ */
+
+var EtcPrint = {
+  d: null,
+  pos: null,
+
+  buka: function (trxId, tombol) {
+    if (tombol) btnBusy(tombol, true, 'Menyiapkan');
+
+    api('apiEtcData', { trx_id: trxId }).then(function (d) {
+      if (tombol) btnBusy(tombol, false, '🖨 Cetak Formulir ETC');
+      EtcPrint.d = d;
+      EtcPrint.pos = d.posisi;
+      if (d.arah) EtcPrint.arah = d.arah;
+      EtcPrint.form();
+    }).catch(function (e) {
+      if (tombol) btnBusy(tombol, false, '🖨 Cetak Formulir ETC');
+      toast(e.message, 'err');
+    });
+  },
+
+  /* ================= LAYAR SEBELUM CETAK ================= */
+  form: function () {
+    var d = EtcPrint.d;
+    var adaNotebook = d.items.some(function (i) { return i.notebook; });
+
+    Modal.open({
+      title: 'Isi Formulir ELS Total Care',
+      sub: 'Yang tercetak hanya isiannya saja, untuk ditumpangkan di atas kertas formulir ' +
+           'yang sudah ada. Periksa dulu, lalu cetak.',
+      okText: '🖨 Cetak isian',
+      body:
+        '<div class="field"><label>Tanggal</label>' +
+          '<input type="date" id="et-tgl"></div>' +
+
+        '<div class="field"><label>Nama sesuai KTP</label>' +
+          '<input type="text" id="et-nama" value="' + Fmt.esc(d.customer.nama) + '">' +
+          '<div class="note">Betulkan kalau berbeda dengan KTP. Tidak mengubah data customer.</div></div>' +
+
+        '<div class="field"><label>Alamat sekarang</label>' +
+          '<textarea id="et-alamat" rows="2">' + Fmt.esc(d.customer.alamat) + '</textarea>' +
+          (d.customer.alamat ? '' :
+            '<div class="note" style="color:var(--warn)">Alamat customer masih kosong di sistem.</div>') +
+        '</div>' +
+
+        '<div class="field"><label>Nomor HP</label>' +
+          '<input type="text" id="et-hp" value="' + Fmt.esc(d.customer.telepon) + '"></div>' +
+
+        '<div class="sep"></div>' +
+        '<label style="font-weight:600;font-size:13px">Produk yang dibeli</label>' +
+        '<div class="note" style="margin-bottom:9px">' +
+          (adaNotebook ? 'Notebook sudah tercentang otomatis. '
+                       : 'Tidak ada yang terbaca sebagai notebook. Centang sendiri. ') +
+          'Barang ber-SN bisa dipilih per unit — tiap unit tercetak satu lembar.' + '</div>' +
+
+        /*
+         * Satu unit satu formulir.
+         *
+         * Layanan ELS Total Care melekat pada unit, bukan pada
+         * transaksi. Kalau customer membeli enam notebook, yang berlaku
+         * enam layanan dengan serial number berbeda — bukan satu
+         * formulir bertuliskan "6 unit".
+         *
+         * Jadi yang dicentang di sini bukan barangnya, melainkan tiap
+         * unitnya. Masing-masing dicetak sebagai lembar sendiri.
+         */
+        (d.items.length
+          ? d.items.map(function (i, n) {
+              /*
+               * Barang ber-SN dipilih per unit, barang tanpa SN cukup
+               * satu centang.
+               *
+               * Tanpa SN, memecahnya per unit tidak menambah keterangan
+               * apa pun — yang tercetak akan sama persis di tiap lembar.
+               * Yang muncul hanya deretan "Unit 1 tanpa SN, Unit 2 tanpa
+               * SN" yang memanjangkan layar tanpa gunanya.
+               */
+              var adaSn = i.sns && i.sns.some(function (x) { return String(x || '').trim(); });
+              var isi = '';
+
+              if (adaSn) {
+                for (var u = 0; u < (Number(i.qty) || 1); u++) {
+                  var sn = i.sns[u] || '';
+                  isi += '<label style="display:flex;gap:9px;align-items:flex-start;' +
+                    'font-weight:400;padding:5px 0 5px 22px">' +
+                    '<input type="checkbox" class="et-pilih" data-n="' + n + '" data-u="' + u + '" ' +
+                      (i.notebook ? 'checked ' : '') + 'style="width:auto;margin-top:3px">' +
+                    '<span style="flex:1">Unit ' + (u + 1) +
+                      (sn ? ' <span class="mono small">SN ' + Fmt.esc(sn) + '</span>'
+                          : ' <span class="small muted">SN belum diisi</span>') +
+                    '</span></label>';
+                }
+              } else {
+                isi = '<label style="display:flex;gap:9px;align-items:flex-start;' +
+                  'font-weight:400;padding:5px 0 5px 22px">' +
+                  '<input type="checkbox" class="et-pilih" data-n="' + n + '" data-u="0" ' +
+                    (i.notebook ? 'checked ' : '') + 'style="width:auto;margin-top:3px">' +
+                  '<span style="flex:1" class="small muted">Ikut dicantumkan di formulir</span>' +
+                  '</label>';
+              }
+
+              return '<div style="padding:8px 0;border-top:1px solid var(--line)">' +
+                '<b>' + Fmt.esc(i.product_name) + '</b>' +
+                '<div class="small muted">' + i.qty + ' unit · acuan ETC ' +
+                  Fmt.rp(i.harga_etc || i.master_price || i.unit_price) +
+                  (i.bundling ? ' · bundling ' + Fmt.rp(i.bundling) + ' tidak ikut' : '') +
+                '</div>' +
+                isi + '</div>';
+            }).join('')
+          : '<div class="small muted">Transaksi ini tidak punya barang.</div>') +
+
+        '<div class="field mt16"><label>Harga notebook per unit</label>' +
+          '<input type="text" id="et-harga" class="mono" inputmode="numeric">' +
+          '<div class="note">Harga unitnya setelah diskon, tanpa tambahan bundling ' +
+            'seperti Office. Diskon yang diberikan pada laptopnya ikut terhitung. ' +
+            'Boleh dibetulkan kalau perlu.</div></div>' +
+
+        '<div class="field"><label>Nama sales</label>' +
+          '<input type="text" id="et-sales" value="' +
+            Fmt.esc(d.trx.sales_name || '') + '">' +
+          '<div class="note">Tercetak di dalam kurung di bawah tanda tangan Pihak ELS Total Care.</div></div>' +
+
+        '<div class="sep"></div>' +
+        '<div class="inline">' +
+          '<button class="btn sm ghost" id="et-atur">⚙ Atur posisi</button>' +
+          '<button class="btn sm ghost" id="et-grid">📐 Cetak lembar ukur</button>' +
+        '</div>' +
+        '<div class="note">Pakai lembar ukur sekali di awal untuk menemukan koordinatnya, ' +
+          'lalu setel lewat Atur posisi. Setelah pas, tidak perlu diulang lagi.</div>',
+
+      onMount: function () {
+        document.getElementById('et-tgl').value = EtcPrint.d.trx.trx_date || '';
+        EtcPrint.hitungHarga();
+
+        document.querySelectorAll('.et-pilih').forEach(function (c) {
+          c.onchange = EtcPrint.hitungHarga;
+        });
+
+        var h = document.getElementById('et-harga');
+        h.oninput = function () {
+          var n = Fmt.parseRp(h.value);
+          h.value = n ? Fmt.angka(n) : '';
+        };
+
+        document.getElementById('et-grid').onclick = function () { EtcPrint.cetakUkur(); };
+        document.getElementById('et-atur').onclick = function () {
+          EtcPrint.simpanIsian();
+          EtcPrint.layarAtur();
+        };
+      },
+
+      onOk: function (close) {
+        if (!EtcPrint.terpilih().length) return toast('Centang minimal satu unit.', 'err');
+        EtcPrint.simpanIsian();
+        close();
+        EtcPrint.cetakIsian();
+      }
+    });
+  },
+
+  isian: null,
+
+  simpanIsian: function () {
+    EtcPrint.isian = {
+      tanggal: document.getElementById('et-tgl').value,
+      nama: document.getElementById('et-nama').value.trim(),
+      alamat: document.getElementById('et-alamat').value.trim(),
+      hp: document.getElementById('et-hp').value.trim(),
+      harga: Fmt.parseRp(document.getElementById('et-harga').value),
+      sales: (document.getElementById('et-sales') || {}).value || '',
+      units: EtcPrint.terpilih()
+    };
+  },
+
+  /** Daftar unit yang dicentang, masing-masing dengan SN-nya sendiri */
+  terpilih: function () {
+    var out = [];
+    document.querySelectorAll('.et-pilih').forEach(function (c) {
+      if (!c.checked) return;
+      var i = EtcPrint.d.items[Number(c.dataset.n)];
+      var u = Number(c.dataset.u) || 0;
+      out.push({
+        barang: i,
+        unit: u + 1,
+        total_unit: Number(i.qty) || 1,
+        sn: i.sns[u] || ''
+      });
+    });
+    return out;
+  },
+
+  /**
+   * Harga yang diisikan adalah harga KATALOG satu unit.
+   *
+   * Bukan total, dan bukan harga bundling. Layanan ini mengikat nilai
+   * notebooknya saja — kalau harga bundling yang dipakai, nilai tukar
+   * tambahnya jadi lebih tinggi dari yang seharusnya.
+   */
+  hitungHarga: function () {
+    var pilih = EtcPrint.terpilih();
+    var el = document.getElementById('et-harga');
+    if (!el) return;
+
+    if (!pilih.length) { el.value = ''; return; }
+
+    var i = pilih[0].barang;
+    var harga = Number(i.harga_etc) || Number(i.master_price) || Number(i.unit_price) || 0;
+    el.value = harga ? Fmt.angka(harga) : '';
+  },
+
+  /* ================= PENYETELAN POSISI ================= */
+
+  label: {
+    tanggal: 'Tanggal', nama: 'Nama sesuai KTP', alamat: 'Alamat sekarang',
+    hp: 'Nomor HP', produk: 'Produk yang dibeli', harga: 'Harga notebook',
+    sales: 'Nama sales'
+  },
+
+  layarAtur: function () {
+    var p = EtcPrint.pos;
+    var urut = ['tanggal', 'nama', 'alamat', 'hp', 'produk', 'harga', 'sales'];
+
+    Modal.open({
+      title: 'Atur posisi isian',
+      sub: 'Kotak di pratinjau menunjukkan letak tiap isian di kertas. ' +
+           'Geser sampai pas dengan garis isian formulir Anda.',
+      okText: 'Simpan posisi',
+      cancelText: 'Kembali',
+      body:
+        '<div class="grid c2" style="align-items:start">' +
+
+          /* ---- pratinjau ---- */
+          '<div>' +
+            '<label style="font-weight:600;font-size:13px">Pratinjau kertas A5</label>' +
+            '<div id="et-prev" style="position:relative;' +
+              'width:' + (EtcPrint.ukuran().w * 2) + 'px;' +
+              'height:' + (EtcPrint.ukuran().h * 2) + 'px;' +
+              'border:1px solid var(--line);background:#fff;margin-top:6px;' +
+              'background-image:linear-gradient(#f2f4f7 1px,transparent 1px),' +
+              'linear-gradient(90deg,#f2f4f7 1px,transparent 1px);' +
+              'background-size:20px 20px"></div>' +
+            '<div class="note">Satu kotak abu = 1 cm. Kotak biru = tempat tulisan jatuh.</div>' +
+          '</div>' +
+
+          /* ---- pengaturan ---- */
+          '<div>' +
+            '<div class="card" style="padding:12px;background:var(--paper)">' +
+              '<b class="small">Arah kertas</b>' +
+              '<div class="note" style="margin-top:2px">Harus sama dengan arah kertas ' +
+                'formulir saat dimasukkan ke printer. Kalau ini salah, tulisannya ' +
+                'tidak akan pernah masuk kotak berapa kali pun disetel.</div>' +
+              '<select id="et-arah" class="mt8">' +
+                '<option value="tegak"' + (EtcPrint.arah === 'tegak' ? ' selected' : '') +
+                  '>Tegak — 148 x 210 mm</option>' +
+                '<option value="mendatar"' + (EtcPrint.arah === 'mendatar' ? ' selected' : '') +
+                  '>Mendatar — 210 x 148 mm</option>' +
+              '</select>' +
+            '</div>' +
+
+            '<div class="card mt16" style="padding:12px;background:var(--paper)">' +
+              '<b class="small">Geser semua sekaligus</b>' +
+              '<div class="note" style="margin-top:2px">Pakai ini kalau semua tulisan ' +
+                'meleset dengan jarak yang sama.</div>' +
+              '<div class="inline mt8">' +
+                '<button class="btn sm ghost et-geser" data-x="0" data-y="-1">↑ 1mm</button>' +
+                '<button class="btn sm ghost et-geser" data-x="0" data-y="1">↓ 1mm</button>' +
+                '<button class="btn sm ghost et-geser" data-x="-1" data-y="0">← 1mm</button>' +
+                '<button class="btn sm ghost et-geser" data-x="1" data-y="0">→ 1mm</button>' +
+              '</div>' +
+              '<div class="inline mt8">' +
+                '<button class="btn sm ghost et-geser" data-x="0" data-y="-5">↑ 5mm</button>' +
+                '<button class="btn sm ghost et-geser" data-x="0" data-y="5">↓ 5mm</button>' +
+                '<button class="btn sm ghost et-geser" data-x="-5" data-y="0">← 5mm</button>' +
+                '<button class="btn sm ghost et-geser" data-x="5" data-y="0">→ 5mm</button>' +
+              '</div>' +
+            '</div>' +
+
+            '<div class="table-wrap mt16"><table><thead><tr>' +
+              '<th>Isian</th><th style="width:64px">Kiri</th><th style="width:64px">Atas</th>' +
+              '<th style="width:64px">Lebar</th><th style="width:60px">Huruf</th>' +
+            '</tr></thead><tbody>' +
+            urut.map(function (k) {
+              return '<tr><td><b class="small">' + Fmt.esc(EtcPrint.label[k]) + '</b></td>' +
+                ['x', 'y', 'lebar', 'size'].map(function (f) {
+                  return '<td><input type="number" class="et-pos" data-k="' + k +
+                    '" data-f="' + f + '" value="' + p[k][f] +
+                    '" step="0.5" style="padding:4px 6px;font-size:13px"></td>';
+                }).join('') + '</tr>';
+            }).join('') + '</tbody></table></div>' +
+          '</div>' +
+        '</div>' +
+
+        '<div class="inline mt16">' +
+          '<button class="btn sm ghost" id="et-coba">🖨 Coba cetak</button>' +
+          '<button class="btn sm ghost" id="et-grid2">📐 Lembar ukur</button>' +
+          '<button class="btn sm ghost" id="et-sheet">📄 Muat dari spreadsheet</button>' +
+          '<button class="btn sm ghost" id="et-reset">Kembalikan bawaan</button>' +
+        '</div>' +
+        '<div class="note">Menata lewat spreadsheet biasanya lebih cepat: buka sheet ' +
+          '<b>ETC_LAYOUT</b> di ELS_OPS_DB, geser lebar kolom dan tinggi baris sampai ' +
+          'penandanya jatuh pas di kotak formulir, lalu tekan tombol di atas.</div>',
+
+      onMount: function () {
+        EtcPrint.gambarPratinjau();
+
+        var sa = document.getElementById('et-arah');
+        if (sa) sa.onchange = function () {
+          EtcPrint.ambilPos();
+          EtcPrint.arah = sa.value;
+          EtcPrint.layarAtur();          // gambar ulang dengan ukuran baru
+        };
+
+        document.querySelectorAll('.et-pos').forEach(function (el) {
+          el.oninput = function () {
+            EtcPrint.ambilPos();
+            EtcPrint.gambarPratinjau();
+          };
+        });
+
+        document.querySelectorAll('.et-geser').forEach(function (b) {
+          b.onclick = function () {
+            var dx = Number(b.dataset.x), dy = Number(b.dataset.y);
+            Object.keys(EtcPrint.pos).forEach(function (k) {
+              EtcPrint.pos[k].x = Math.round((EtcPrint.pos[k].x + dx) * 10) / 10;
+              EtcPrint.pos[k].y = Math.round((EtcPrint.pos[k].y + dy) * 10) / 10;
+            });
+            document.querySelectorAll('.et-pos').forEach(function (el) {
+              el.value = EtcPrint.pos[el.dataset.k][el.dataset.f];
+            });
+            EtcPrint.gambarPratinjau();
+          };
+        });
+
+        document.getElementById('et-coba').onclick = function () {
+          EtcPrint.ambilPos();
+          EtcPrint.cetakIsian();
+        };
+        document.getElementById('et-grid2').onclick = function () {
+          EtcPrint.cetakUkur();
+        };
+
+        /*
+         * Mengambil posisi dari sheet ETC_LAYOUT.
+         *
+         * Menggeser kolom dan baris di spreadsheet lebih dekat dengan
+         * cara orang menata sesuatu di kertas daripada mengetik angka
+         * milimeter satu per satu.
+         */
+        document.getElementById('et-sheet').onclick = function () {
+          var b = this;
+          btnBusy(b, true, 'Memuat');
+          api('apiLayoutEtc', {}).then(function (r) {
+            btnBusy(b, false, '📄 Muat dari spreadsheet');
+
+            // Isian yang tidak ada penandanya di sheet tetap memakai
+            // angka yang sekarang, jadi tidak ada yang hilang
+            Object.keys(r.posisi).forEach(function (k) {
+              if (EtcPrint.pos[k]) {
+                EtcPrint.pos[k].x = r.posisi[k].x;
+                EtcPrint.pos[k].y = r.posisi[k].y;
+                EtcPrint.pos[k].lebar = r.posisi[k].lebar;
+                EtcPrint.pos[k].size = r.posisi[k].size;
+                if (r.posisi[k].baris) EtcPrint.pos[k].baris = r.posisi[k].baris;
+              }
+            });
+            if (r.arah) EtcPrint.arah = r.arah;
+
+            if (r.diLuar && r.diLuar.length) {
+              /*
+               * Penanda yang jatuh di luar kertas tidak akan tercetak.
+               * Diberi tahu sekarang, sebelum kertasnya keluar kosong.
+               */
+              toast(r.diLuar.join(', ') + ' jatuh di luar kertas ' +
+                r.kertas.lebar + ' x ' + r.kertas.tinggi + ' mm. ' +
+                'Geser penandanya lebih ke atas atau ke kiri di spreadsheet.',
+                'err', '⚠ Di luar kertas');
+            } else {
+              toast(Object.keys(r.posisi).length + ' posisi diambil dari spreadsheet.', 'ok');
+            }
+            EtcPrint.layarAtur();
+          }).catch(function (e) {
+            btnBusy(b, false, '📄 Muat dari spreadsheet');
+            toast(e.message, 'err');
+          });
+        };
+        document.getElementById('et-reset').onclick = function () {
+          Modal.confirm('Kembalikan ke posisi bawaan?',
+            'Penyetelan Anda akan dihapus.', 'Kembalikan', function () {
+              api('apiResetPosisiEtc', {}).then(function (r) {
+                EtcPrint.pos = r.posisi;
+                if (r.arah) EtcPrint.arah = r.arah;
+                toast('Posisi dikembalikan ke bawaan.', 'ok');
+                EtcPrint.layarAtur();
+              }).catch(function (e) { toast(e.message, 'err'); });
+            }, true);
+        };
+      },
+
+      onOk: function (close, btn) {
+        EtcPrint.ambilPos();
+        btnBusy(btn, true);
+        api('apiSavePosisiEtc', { posisi: EtcPrint.pos, arah: EtcPrint.arah }).then(function (r) {
+          EtcPrint.pos = r.posisi;
+          if (r.arah) EtcPrint.arah = r.arah;
+          close();
+          toast('Posisi tersimpan. Berlaku untuk semua pencetakan berikutnya.', 'ok');
+          EtcPrint.form();
+        }).catch(function (e) {
+          btnBusy(btn, false, 'Simpan posisi');
+          toast(e.message, 'err');
+        });
+      }
+    });
+  },
+
+  /**
+   * Menggambar letak tiap isian pada kertas A5, diperkecil 2 piksel
+   * per milimeter.
+   *
+   * Tanpa ini, menyetel posisi berarti menebak lalu mencetak, berulang
+   * kali. Dengan gambar di layar, sebagian besar penyesuaian bisa
+   * diselesaikan sebelum kertas pertama dipakai.
+   */
+  gambarPratinjau: function () {
+    var box = document.getElementById('et-prev');
+    if (!box) return;
+
+    var skala = 2;   // 1 mm = 2 piksel, jadi A5 148x210mm = 296x420px
+    var p = EtcPrint.pos;
+    var v = EtcPrint.isian || {};
+
+    var contoh = {
+      tanggal: v.tanggal || '18 September 2026',
+      nama: v.nama || 'Nama sesuai KTP',
+      alamat: v.alamat || 'Alamat customer',
+      hp: v.hp || '08123456789',
+      produk: 'Nama produk + SN',
+      harga: v.harga ? Fmt.rp(v.harga) : 'Rp0',
+      sales: v.sales || 'Nama sales'
+    };
+
+    box.innerHTML = Object.keys(p).map(function (k) {
+      var b = p[k];
+      var tinggi = (b.baris ? b.baris * 5 : 5);
+      return '<div style="position:absolute;' +
+        'left:' + (b.x * skala) + 'px;top:' + (b.y * skala) + 'px;' +
+        'width:' + (b.lebar * skala) + 'px;min-height:' + (tinggi * skala) + 'px;' +
+        'border:1px dashed var(--brand);background:rgba(11,95,255,.07);' +
+        'font-size:' + Math.max(b.size * 1.1, 8) + 'px;line-height:1.15;' +
+        'color:#111;overflow:hidden;padding:1px 2px">' +
+        Fmt.esc(contoh[k] || k) + '</div>';
+    }).join('');
+  },
+
+  ambilPos: function () {
+    document.querySelectorAll('.et-pos').forEach(function (el) {
+      var v = parseFloat(el.value);
+      if (!isNaN(v)) EtcPrint.pos[el.dataset.k][el.dataset.f] = v;
+    });
+  },
+
+  /* ================= PENCETAKAN ================= */
+
+  /** Kertas A5 tanpa margin, supaya koordinatnya benar-benar dari tepi kertas */
+  /* Arah kertas. 'tegak' = A5 berdiri (148 x 210 mm),
+     'mendatar' = A5 tidur (210 x 148 mm). */
+  arah: 'tegak',
+
+  ukuran: function () {
+    return EtcPrint.arah === 'mendatar'
+      ? { w: 210, h: 148 }
+      : { w: 148, h: 210 };
+  },
+
+  siapkanGaya: function () {
+    bersihkanGayaCetak_();
+
+    var st = document.createElement('style');
+    st.id = 'gaya-etc';
+    var u = EtcPrint.ukuran();
+    st.textContent =
+      '@media print {' +
+        '@page { size: ' + u.w + 'mm ' + u.h + 'mm; margin: 0; }' +
+        'body > *:not(#etc-area) { display: none !important; }' +
+        '#etc-area { display: block !important; position: absolute; ' +
+          'left: 0; top: 0; width: ' + u.w + 'mm; height: ' + u.h + 'mm; }' +
+      '}' +
+      '#etc-area { display: none; }';
+    document.head.appendChild(st);
+  },
+
+  area: function () {
+    var a = document.getElementById('etc-area');
+    if (!a) {
+      a = document.createElement('div');
+      a.id = 'etc-area';
+      document.body.appendChild(a);
+    }
+    return a;
+  },
+
+  kotak: function (p, isi, tambahan) {
+    return '<div style="position:absolute;left:' + p.x + 'mm;top:' + p.y + 'mm;' +
+      'width:' + p.lebar + 'mm;font-size:' + p.size + 'pt;' +
+      'font-family:Arial,Helvetica,sans-serif;color:#000;line-height:1.3;' +
+      (p.tebal ? 'font-weight:700;' : '') + (tambahan || '') + '">' + isi + '</div>';
+  },
+
+  /** Yang tercetak hanya isinya — tidak ada judul, garis, atau keterangan apa pun */
+  cetakIsian: function () {
+    var d = EtcPrint.d, p = EtcPrint.pos, v = EtcPrint.isian;
+    if (!v) return toast('Isiannya belum siap.', 'err');
+
+    var tgl = v.tanggal;
+    try {
+      if (tgl) {
+        var b = ['', 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+                 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+        var q = tgl.split('-');
+        tgl = Number(q[2]) + ' ' + b[Number(q[1])] + ' ' + q[0];
+      }
+    } catch (e) {}
+
+    /*
+     * Satu lembar untuk tiap unit.
+     *
+     * Tiap lembar memuat satu serial number dan harga satu unit,
+     * karena layanannya memang melekat pada unit — bukan pada
+     * transaksi. Printer mengeluarkannya berurutan dalam sekali
+     * perintah cetak.
+     */
+    var daftar = v.units || [];
+    if (!daftar.length) return toast('Belum ada unit yang dipilih.', 'err');
+
+    EtcPrint.siapkanGaya();
+
+    var u = EtcPrint.ukuran();
+
+    EtcPrint.area().innerHTML = daftar.map(function (x, n) {
+      var i = x.barang;
+
+      var produk = '<div>' + Fmt.esc(i.product_name) + '</div>' +
+        (x.sn ? '<div style="font-size:.88em">SN: ' + Fmt.esc(x.sn) + '</div>' : '') +
+        (x.total_unit > 1
+          ? '<div style="font-size:.82em">Unit ke-' + x.unit + ' dari ' + x.total_unit + '</div>'
+          : '');
+
+      var isiLembar =
+        EtcPrint.kotak(p.tanggal, Fmt.esc(tgl)) +
+        EtcPrint.kotak(p.nama, Fmt.esc(v.nama)) +
+        EtcPrint.kotak(p.alamat, Fmt.esc(v.alamat)) +
+        EtcPrint.kotak(p.hp, Fmt.esc(v.hp)) +
+        EtcPrint.kotak(p.produk, produk) +
+        EtcPrint.kotak(p.harga, Fmt.rp(v.harga)) +
+        (v.sales && p.sales ? EtcPrint.kotak(p.sales, Fmt.esc(v.sales)) : '');
+
+      // Tiap lembar setinggi satu kertas, dipisah paksa ke halaman baru
+      return '<div style="position:relative;width:' + u.w + 'mm;height:' + u.h + 'mm;' +
+        (n < daftar.length - 1 ? 'page-break-after:always;' : '') + '">' +
+        isiLembar + '</div>';
+    }).join('');
+
+    setTimeout(function () {
+      try { window.print(); } catch (e) { toast('Browser menolak membuka jendela cetak.', 'err'); }
+    }, 300);
+
+    api('apiCatatCetakEtc', {
+      trx_id: d.trx.trx_id,
+      ringkas: daftar.length + ' lembar · ' +
+               daftar.map(function (x) {
+                 return x.barang.product_name + (x.sn ? ' (' + x.sn + ')' : '');
+               }).join(', ') + ' · ' + Fmt.rp(v.harga) + ' per unit'
+    }).catch(function () {});
+  },
+
+  /**
+   * Lembar ukur: garis tiap 5 mm dengan angka di tepinya.
+   * Dicetak sekali, ditumpuk dengan kertas formulir dan diterawang,
+   * atau diukur langsung dengan penggaris.
+   */
+  cetakUkur: function () {
+    var garis = '';
+
+    var u = EtcPrint.ukuran();
+
+    for (var y = 0; y <= u.h; y += 5) {
+      var tebalY = (y % 10 === 0);
+      garis += '<div style="position:absolute;left:0;top:' + y + 'mm;width:' + u.w + 'mm;' +
+        'border-top:' + (tebalY ? '0.3mm solid #999' : '0.1mm solid #ddd') + '"></div>';
+      if (tebalY && y > 0) {
+        garis += '<div style="position:absolute;left:1mm;top:' + (y + 0.5) + 'mm;' +
+          'font:7pt Arial;color:#c00">' + y + '</div>';
+      }
+    }
+
+    for (var x = 0; x <= u.w; x += 5) {
+      var tebalX = (x % 10 === 0);
+      garis += '<div style="position:absolute;top:0;left:' + x + 'mm;height:' + u.h + 'mm;' +
+        'border-left:' + (tebalX ? '0.3mm solid #999' : '0.1mm solid #ddd') + '"></div>';
+      if (tebalX && x > 0) {
+        garis += '<div style="position:absolute;top:1mm;left:' + (x + 0.5) + 'mm;' +
+          'font:7pt Arial;color:#c00">' + x + '</div>';
+      }
+    }
+
+    EtcPrint.siapkanGaya();
+    EtcPrint.area().innerHTML = garis +
+      '<div style="position:absolute;left:20mm;top:' + Math.round(u.h / 2) +
+        'mm;width:' + (u.w - 40) + 'mm;font:9pt Arial;color:#c00">' +
+        'Lembar ukur A5 ' + (EtcPrint.arah === 'mendatar' ? 'MENDATAR' : 'TEGAK') +
+        ' — angka merah dalam milimeter dari pojok kiri atas.<br>' +
+        'Tumpuk dengan kertas formulir ETC, lalu baca posisi tiap garis isian.<br>' +
+        'Masukkan angkanya di tombol Atur posisi.' +
+      '</div>';
+
+    setTimeout(function () {
+      try { window.print(); } catch (e) { toast('Browser menolak membuka jendela cetak.', 'err'); }
+    }, 300);
+  }
+};
+</script>

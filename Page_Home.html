@@ -1,0 +1,201 @@
+<script>
+/* ============================================================
+   Beranda
+
+   Yang ditampilkan hanya satu hal: apa yang menunggu dikerjakan
+   sekarang, dan tombol untuk langsung ke sana.
+
+   Daftar hak akses, nomor pegawai, dan daftar menu yang sedang
+   dibangun sudah dibuang. Itu keterangan tentang sistem, bukan
+   tentang pekerjaan — dan orang yang membuka aplikasi jam sembilan
+   pagi tidak sedang mencari nomor pegawainya sendiri.
+   ============================================================ */
+App.pages.home = {
+  title: 'Beranda',
+
+  html: function () {
+    return '<div id="hm-root"><div class="empty">Memuat…</div></div>';
+  },
+
+  mount: function () {
+    App.pages.home.gambar();
+
+    // Ikut menyegar saat ada perubahan dari divisi lain
+    clearInterval(App.pages.home.timer);
+    App.pages.home.timer = setInterval(function () {
+      if (!document.getElementById('hm-root')) {
+        clearInterval(App.pages.home.timer);
+        return;
+      }
+      App.pages.home.gambar(true);
+    }, 30000);
+  },
+
+  /** Tugas tiap divisi: apa yang dihitung, dan ke mana tombolnya */
+  tugas: {
+    /*
+     * Ikonnya mengikuti menu, bukan berdiri sendiri.
+     *
+     * Dulu beranda punya daftar ikonnya sendiri — begitu ikon menu
+     * diperbarui, yang di beranda tertinggal dan keduanya jadi
+     * berbeda untuk hal yang sama.
+     */
+    SALES: [
+      { k: 'order', ikon: '🛒', judul: 'Buat pesanan baru', sub: 'Mulai transaksi untuk customer di depan Anda', utama: true },
+      { k: 'mytrx', ikon: '📋', judul: 'Pesanan saya', sub: 'Lihat dan ubah pesanan yang sedang berjalan' },
+      { k: 'cust',  ikon: '👥', judul: 'Data customer', sub: 'Cari atau tambah data customer' }
+    ],
+    SALES_ONLINE: [
+      { k: 'order', ikon: '🌐', judul: 'Buat pesanan online', sub: 'Catat pesanan yang masuk dari mana pun', utama: true },
+      { k: 'mytrx', ikon: '📋', judul: 'Pesanan saya', sub: 'Lihat dan ubah pesanan yang sedang berjalan' },
+      { k: 'cari',  ikon: '🔍', judul: 'Cari pesanan', sub: 'Termasuk pesanan lama yang sudah diarsipkan' },
+      { k: 'cust',  ikon: '👥', judul: 'Data customer', sub: 'Cari atau tambah data customer' }
+    ],
+    GUDANG: [
+      { k: 'queue', ikon: '📥', judul: 'Antrian pesanan', sub: 'Pesanan yang menunggu disiapkan', hitung: 'queue', utama: true },
+      { k: 'done',  ikon: '✅', judul: 'Sudah disiapkan', sub: 'Yang sudah selesai hari ini' },
+      { k: 'lacak', ikon: '🔦', judul: 'Lacak barang keluar', sub: 'Cari serial number yang pernah keluar' }
+    ],
+    EKSEKUSI: [
+      { k: 'queue',  ikon: '📥', judul: 'Antrian online', sub: 'Pesanan yang menunggu disiapkan', hitung: 'queue', utama: true },
+      { k: 'serah',  ikon: '📬', judul: 'Siap diserahkan', sub: 'Tinggal diberikan atau dikirim', hitung: 'serah' },
+      { k: 'indent', ikon: '📦', judul: 'Menunggu barang', sub: 'Pesanan yang barangnya belum datang', hitung: 'indent' },
+      { k: 'cari',   ikon: '🔍', judul: 'Cari pesanan', sub: 'Termasuk yang sudah diarsipkan' }
+    ],
+    ADMIN: [
+      { k: 'nota',    ikon: '🧾', judul: 'Resep & nota', sub: 'Menunggu dicetak dan diberi nomor nota', hitung: 'nota', utama: true },
+      { k: 'monitor', ikon: '🧭', judul: 'Monitoring', sub: 'Semua transaksi berjalan' },
+      { k: 'cust',    ikon: '👥', judul: 'Data customer', sub: 'Cari atau perbaiki data customer' },
+      { k: 'laporan', ikon: '📈', judul: 'Laporan', sub: 'Omzet, kecepatan proses, dan piutang' }
+    ],
+    KASIR: [
+      { k: 'pay',  ikon: '💳', judul: 'Pembayaran', sub: 'Menunggu dibayar atau dilunasi', hitung: 'pay', utama: true },
+      { k: 'hist', ikon: '🧾', judul: 'Riwayat bayar', sub: 'Uang masuk hari ini' }
+    ],
+    TEKNISI: [
+      { k: 'act',  ikon: '🛠️', judul: 'Antrian pekerjaan', sub: 'Menunggu dikerjakan dan diserahkan', hitung: 'act', utama: true },
+      { k: 'call', ikon: '📣', judul: 'Panggil customer', sub: 'Papan pemanggilan ruang tunggu' },
+      { k: 'kerja', ikon: '✍️', judul: 'Catat pekerjaan', sub: 'Rakit, inkcharging, dan lainnya' }
+    ],
+    SUPERADMIN: [
+      { k: 'monitor', ikon: '🧭', judul: 'Monitoring', sub: 'Semua transaksi berjalan', utama: true },
+      { k: 'laporan', ikon: '📈', judul: 'Laporan', sub: 'Omzet, kecepatan proses, dan piutang' },
+      { k: 'users',   ikon: '🔑', judul: 'Kelola user', sub: 'Akun divisi, sales, dan petugas' },
+      { k: 'produk',  ikon: '📦', judul: 'Master barang', sub: 'Sinkronisasi dan daftar barang' },
+      { k: 'setting', ikon: '⚙️', judul: 'Pengaturan', sub: 'Semua yang bisa diubah tanpa menyentuh kode' }
+    ]
+  },
+
+  gambar: function (diam) {
+    var P = App.pages.home;
+    var s = App.state.session;
+    if (!s) return;
+
+    var kerja = (window.NotifCenter && NotifCenter.kerja) ? NotifCenter.kerja : {};
+    var daftar = (P.tugas[s.role] || []).filter(function (t) {
+      return App.pages[t.k];        // hanya menu yang memang tersedia
+    });
+
+    var utama = daftar.filter(function (t) { return t.utama; })[0];
+    var jumlahUtama = utama && utama.hitung ? (kerja[utama.hitung] || 0) : null;
+
+    var jam = new Date().getHours();
+    var sapa = jam < 11 ? 'Selamat pagi' : (jam < 15 ? 'Selamat siang'
+             : (jam < 18 ? 'Selamat sore' : 'Selamat malam'));
+
+    var root = document.getElementById('hm-root');
+    if (!root) return;
+
+    root.innerHTML =
+      /* ---------- sapaan dan keadaan sekarang ---------- */
+      '<div class="card" style="background:linear-gradient(135deg,var(--brand),#0846C4);' +
+        'color:#fff;border:0;box-shadow:0 10px 30px -12px rgba(11,95,255,.5)">' +
+        '<div class="between">' +
+          '<div>' +
+            '<div style="opacity:.85;font-size:14px">' + sapa + '</div>' +
+            '<div style="font-size:23px;font-weight:800;letter-spacing:-.02em">' +
+              Fmt.esc(s.full_name) + '</div>' +
+            '<div style="opacity:.85;font-size:13.5px">' +
+              Fmt.esc(Fmt.roleLabel(s.role)) + ' · ' + Fmt.esc(s.branch) + '</div>' +
+          '</div>' +
+          (jumlahUtama !== null
+            ? '<div style="text-align:right">' +
+                '<div style="font-size:44px;font-weight:800;line-height:1">' + jumlahUtama + '</div>' +
+                '<div style="opacity:.85;font-size:13px">' +
+                  (jumlahUtama ? 'menunggu Anda' : 'semua beres') + '</div>' +
+              '</div>'
+            : '') +
+        '</div>' +
+      '</div>' +
+
+      /* ---------- keadaan kosong, supaya jelas tidak ada yang tertinggal ---------- */
+      (jumlahUtama === 0
+        ? '<div class="card mt16" style="background:var(--ok-soft);border-color:var(--ok)">' +
+          '<b style="color:var(--ok)">Tidak ada yang menunggu dikerjakan</b>' +
+          '<div class="small">Layar ini memperbarui dirinya sendiri. Kalau ada pekerjaan masuk, ' +
+          'angkanya naik dan alarm berbunyi.</div></div>'
+        : '') +
+
+      /* ---------- pintasan tugas ---------- */
+      '<div class="grid c2 mt16">' +
+        daftar.map(function (t) {
+          var n = t.hitung ? (kerja[t.hitung] || 0) : null;
+          /*
+           * Kartu pintasan dibuat seragam: ikon dalam kotak, judul,
+           * keterangan satu baris, lalu angka atau panah di kanan.
+           *
+           * Sebelumnya ikonnya menempel di judul sebagai huruf biasa,
+           * jadi tinggi tiap kartu berbeda mengikuti panjang judulnya
+           * dan deretannya terlihat naik turun.
+           */
+          return '<div class="card hm-go" data-k="' + Fmt.esc(t.k) + '" ' +
+              'style="cursor:pointer;display:flex;align-items:center;gap:14px;' +
+              'border-left:4px solid ' +
+              (n ? 'var(--danger)' : (t.utama ? 'var(--brand)' : 'var(--line)')) + '">' +
+
+            '<div style="width:42px;height:42px;flex-shrink:0;border-radius:11px;' +
+              'display:grid;place-content:center;font-size:19px;' +
+              'background:' + (n ? 'var(--danger-soft)' : 'var(--paper)') + '">' +
+              t.ikon + '</div>' +
+
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-size:15px;font-weight:700;line-height:1.3">' +
+                Fmt.esc(t.judul) + '</div>' +
+              '<div class="small muted" style="white-space:nowrap;overflow:hidden;' +
+                'text-overflow:ellipsis">' + Fmt.esc(t.sub) + '</div>' +
+            '</div>' +
+
+            (n
+              ? '<div style="font-size:24px;font-weight:800;color:var(--danger);' +
+                'flex-shrink:0">' + n + '</div>'
+              : '<div class="muted" style="font-size:19px;flex-shrink:0">›</div>') +
+          '</div>';
+        }).join('') +
+      '</div>' +
+
+      /* ---------- pemberitahuan terbaru, kalau ada ---------- */
+      (window.NotifCenter && NotifCenter.data && NotifCenter.data.list &&
+       NotifCenter.data.list.length
+        ? '<div class="card mt16">' +
+            '<div class="between">' +
+              '<h3 class="mb0">Pemberitahuan terbaru</h3>' +
+              '<button class="btn sm ghost hm-go" data-k="notif">Lihat semua</button>' +
+            '</div>' +
+            NotifCenter.data.list.slice(0, 4).map(function (n) {
+              return '<div style="padding:9px 0;border-top:1px solid var(--line)">' +
+                '<b class="small">' + Fmt.esc(n.title) + '</b>' +
+                '<div class="small muted">' + Fmt.esc(n.body) + '</div>' +
+                '<div class="small muted">' + Fmt.esc(Fmt.jamSaja(n.at)) + '</div>' +
+              '</div>';
+            }).join('') +
+          '</div>'
+        : '');
+
+    root.onclick = function (e) {
+      var c = e.target.closest('.hm-go');
+      if (!c) return;
+      App.go(c.dataset.k);
+    };
+  }
+};
+</script>

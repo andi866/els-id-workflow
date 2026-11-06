@@ -1,0 +1,161 @@
+<script>
+/* ============================================================
+   Halaman QR Customer
+
+   Membuat QR dari alamat form publik, lalu menyediakan tampilan
+   siap cetak untuk dipasang di meja Sales.
+   ============================================================ */
+App.pages.qr = {
+  title: 'QR Customer',
+  url: '',
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<h3>Alamat form customer</h3>' +
+        '<p class="hint">Isi dengan Web app URL dari project <b>ELS_CUSTOMER_FORM</b>. ' +
+          'Bentuknya berakhiran <span class="mono">/exec</span>.</p>' +
+        '<div class="inline">' +
+          '<input type="text" id="qr-url" placeholder="https://script.google.com/macros/s/…/exec" style="flex:1;min-width:240px">' +
+          '<button class="btn" id="qr-simpan">Simpan</button>' +
+        '</div>' +
+        '<div class="note" id="qr-status"></div>' +
+      '</div>' +
+
+      '<div class="card mt16" id="qr-hasil">' +
+        '<div class="empty">Isi alamatnya dulu untuk membuat QR.</div>' +
+      '</div>';
+  },
+
+  mount: function () {
+    var P = App.pages.qr;
+
+    // Pustaka pembuat QR dimuat dari internet, dipakai hanya di halaman ini
+    if (!window.QRCode) {
+      var s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+      s.onload = function () { P.gambar(); };
+      s.onerror = function () {
+        document.getElementById('qr-status').innerHTML =
+          '<span style="color:var(--danger)">Pembuat QR gagal dimuat. ' +
+          'Cek sambungan internet, atau buat QR-nya lewat layanan lain memakai alamat di atas.</span>';
+      };
+      document.head.appendChild(s);
+    }
+
+    api('apiListSettings', {}).then(function (rows) {
+      var s = rows.filter(function (x) { return x.key === 'PUBLIC_FORM_URL'; })[0];
+      if (s && s.value) {
+        document.getElementById('qr-url').value = s.value;
+        P.url = s.value;
+        P.gambar();
+      }
+    }).catch(function () {
+      document.getElementById('qr-status').textContent =
+        'Hanya Super Admin yang bisa menyimpan alamatnya. Anda tetap bisa membuat QR sementara.';
+    });
+
+    document.getElementById('qr-simpan').onclick = function () {
+      var u = document.getElementById('qr-url').value.trim();
+      if (u.indexOf('http') !== 0) return toast('Alamatnya harus diawali https://', 'err');
+
+      var b = this;
+      btnBusy(b, true);
+      api('apiSaveSetting', { key: 'PUBLIC_FORM_URL', value: u }).then(function () {
+        btnBusy(b, false, 'Simpan');
+        P.url = u;
+        toast('Alamat tersimpan.', 'ok');
+        P.gambar();
+      }).catch(function (e) {
+        btnBusy(b, false, 'Simpan');
+        toast(e.message, 'err');
+        P.url = u;
+        P.gambar();
+      });
+    };
+  },
+
+  gambar: function () {
+    var P = App.pages.qr;
+    var u = document.getElementById('qr-url').value.trim() || P.url;
+    if (!u) return;
+    if (!window.QRCode) return;
+
+    document.getElementById('qr-hasil').innerHTML =
+      '<div class="between">' +
+        '<div><h3 class="mb0">QR siap cetak</h3>' +
+        '<p class="hint mb0">Tempel di meja Sales atau di depan pintu masuk.</p></div>' +
+        '<button class="btn" id="qr-cetak">🖨 Cetak</button>' +
+      '</div>' +
+      '<div class="sep"></div>' +
+      '<div id="qr-preview" style="display:flex;justify-content:center;padding:14px 0"></div>' +
+      '<div class="small muted" style="text-align:center;word-break:break-all">' +
+        Fmt.esc(u) + '</div>';
+
+    var kotak = document.getElementById('qr-preview');
+    kotak.innerHTML = '';
+    try {
+      new QRCode(kotak, {
+        text: u, width: 220, height: 220,
+        correctLevel: QRCode.CorrectLevel.M
+      });
+    } catch (e) {
+      kotak.innerHTML = '<div class="small" style="color:var(--danger)">QR gagal dibuat: ' +
+        Fmt.esc(e.message) + '</div>';
+      return;
+    }
+
+    document.getElementById('qr-cetak').onclick = function () { P.cetak(u); };
+  },
+
+  cetak: function (u) {
+    var nama = App.state.meta.company || 'ELS.ID';
+
+    var area = document.getElementById('cetak-area');
+    if (!area) {
+      area = document.createElement('div');
+      area.id = 'cetak-area';
+      document.body.appendChild(area);
+    }
+
+    var lama = document.getElementById('gaya-cetak');
+    if (lama) lama.remove();
+    var st = document.createElement('style');
+    st.id = 'gaya-cetak';
+    st.textContent =
+      '@media print {' +
+        '@page { size: A4; margin: 14mm; }' +
+        'body > *:not(#cetak-area) { display: none !important; }' +
+        '#cetak-area { display: block !important; }' +
+      '}' +
+      '#cetak-area { display: none; }';
+    document.head.appendChild(st);
+
+    area.innerHTML =
+      '<div style="text-align:center;font-family:Arial,Helvetica,sans-serif;padding-top:18mm">' +
+        '<div style="font-size:30px;font-weight:800;letter-spacing:-.02em">' + Fmt.esc(nama) + '</div>' +
+        '<div style="font-size:19px;margin-top:10px">Silakan isi data Anda di sini</div>' +
+        '<div style="font-size:15px;color:#555;margin-top:5px">' +
+          'Supaya pelayanan lebih cepat dan pesanan Anda mudah dilacak</div>' +
+        '<div id="qr-cetakbox" style="display:flex;justify-content:center;margin:22mm 0"></div>' +
+        '<div style="font-size:17px;font-weight:700">Arahkan kamera HP ke kode di atas</div>' +
+        '<div style="font-size:14px;color:#555;margin-top:6px">' +
+          'Tidak perlu memasang aplikasi apa pun</div>' +
+        '<div style="font-size:11px;color:#888;margin-top:16mm;word-break:break-all">' +
+          Fmt.esc(u) + '</div>' +
+      '</div>';
+
+    var kotak = document.getElementById('qr-cetakbox');
+    try {
+      new QRCode(kotak, { text: u, width: 340, height: 340, correctLevel: QRCode.CorrectLevel.M });
+    } catch (e) {
+      toast('QR gagal dibuat untuk cetak.', 'err');
+      return;
+    }
+
+    setTimeout(function () {
+      try { window.print(); } catch (e) { toast('Browser menolak membuka jendela cetak.', 'err'); }
+    }, 400);
+  }
+};
+</script>

@@ -1,0 +1,170 @@
+<script>
+/* ============================================================
+   Halaman Master Barang
+
+   Isinya salinan data dari spreadsheet pusat. Tidak bisa diubah
+   dari sini — perubahan harus dilakukan di pusat, lalu disinkronkan.
+   ============================================================ */
+App.pages.produk = {
+  title: 'Master Barang',
+
+  html: function () {
+    return '' +
+      '<div class="grid c3" id="pr-stat"></div>' +
+      '<div class="card mt16" id="pr-sync"></div>' +
+      '<div class="card mt16">' +
+        '<div class="between">' +
+          '<div style="flex:1;min-width:220px">' +
+            '<h3 class="mb0">Cari barang</h3>' +
+            '<p class="hint mb0">Kode atau nama barang.</p>' +
+          '</div>' +
+          (App.can('PRODUCT_SYNC_RUN')
+            ? '<button class="btn" id="pr-run">Sinkronkan sekarang</button>' : '') +
+        '</div>' +
+        '<input type="text" id="pr-q" class="mt16" placeholder="Ketik kode atau nama…" autocomplete="off">' +
+      '</div>' +
+      '<div class="mt16" id="pr-list"><div class="empty">Memuat…</div></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.produk;
+    document.getElementById('pr-q').oninput = debounce(function () { P.load(); }, 260);
+
+    var b = document.getElementById('pr-run');
+    if (b) b.onclick = function () { P.sync(this); };
+
+    P.load();
+  },
+
+  load: function () {
+    var P = App.pages.produk;
+    var q = document.getElementById('pr-q').value.trim();
+
+    api('apiProductList', { q: q }).then(function (d) {
+      document.getElementById('pr-stat').innerHTML =
+        '<div class="stat"><b>' + Fmt.angka(d.totalMaster - d.demo) + '</b>' +
+          '<span>Barang dari pusat</span></div>' +
+        '<div class="stat"><b style="color:' + (d.demo ? 'var(--warn)' : 'var(--muted)') + '">' +
+          d.demo + '</b><span>Barang contoh (DEMO)</span></div>' +
+        '<div class="stat"><b>' + Fmt.angka(d.total) + '</b><span>Hasil pencarian</span></div>';
+
+      var s = d.sync;
+      document.getElementById('pr-sync').innerHTML = s
+        ? '<div class="between">' +
+            '<div>' +
+              '<b>Sinkronisasi terakhir ' +
+                (s.status === 'OK' ? '<span class="badge ok">Berhasil</span>'
+                                   : '<span class="badge danger">Gagal</span>') + '</b>' +
+              '<div class="small muted">' + Fmt.esc(Fmt.jam(s.at)) + ' · ' +
+                Fmt.esc(s.mode === 'AUTO' ? 'otomatis' : 'manual oleh ' + s.oleh) + '</div>' +
+              (s.status === 'OK'
+                ? '<div class="small">' + Fmt.angka(s.ditulis) + ' barang' +
+                  (s.berubah ? ' · ' + s.berubah + ' berubah' : ' · tidak ada perubahan') + '</div>'
+                : '<div class="small" style="color:var(--danger)">' + Fmt.esc(s.message) + '</div>') +
+            '</div>' +
+          '</div>'
+        : '<div class="small muted">Belum pernah disinkronkan. Data barang masih kosong atau berisi contoh saja.</div>';
+
+      /*
+       * Keadaan pemantauan ditampilkan terpisah dari riwayat sinkronisasi.
+       *
+       * Dua hal yang berbeda: kapan terakhir disalin, dan apakah saat ini
+       * data di pusat sudah berbeda. Tanpa yang kedua, satu-satunya cara
+       * memastikan harga sudah terbaru adalah menekan tombol sinkron —
+       * menyalin ribuan baris hanya untuk menjawab sebuah pertanyaan.
+       */
+      var pt = d.pantau;
+      if (pt) {
+        var warna = pt.ada_perubahan === true ? 'var(--warn)'
+                  : (pt.ada_perubahan === false ? 'var(--ok)' : 'var(--muted)');
+
+        document.getElementById('pr-sync').innerHTML +=
+          '<div class="mt16" style="border-top:1px solid var(--line);padding-top:12px">' +
+            '<div class="between">' +
+              '<div>' +
+                '<b class="small">Pemantauan perubahan pusat</b>' +
+                '<div class="small" style="color:' + warna + '">' +
+                  (pt.ada_perubahan === true ? '● ' : (pt.ada_perubahan === false ? '✓ ' : '')) +
+                  Fmt.esc(pt.pesan) + '</div>' +
+                '<div class="small muted">' +
+                  (pt.aktif
+                    ? 'Diperiksa tiap ' + pt.jeda + ' menit. Menyalin sendiri begitu ada perubahan.'
+                    : 'Belum aktif — minta Super Admin menjalankan pasangJadwalPantau().') +
+                  (pt.salin_terakhir
+                    ? ' Tersalin terakhir ' + Fmt.esc(Fmt.jam(pt.salin_terakhir)) + '.' : '') +
+                '</div>' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+      }
+
+      if (d.demo) {
+        document.getElementById('pr-sync').innerHTML +=
+          '<div class="mt16" style="background:var(--warn-soft);padding:10px 12px;border-radius:10px">' +
+          '<b class="small" style="color:var(--warn)">Masih ada ' + d.demo + ' barang contoh</b>' +
+          '<div class="small">Barang berkode DEMO- dipakai untuk uji coba. ' +
+          'Hapus lewat fungsi hapusProdukContoh() sebelum sistem dipakai operasional.</div></div>';
+      }
+
+      if (!d.list.length) {
+        document.getElementById('pr-list').innerHTML =
+          '<div class="empty"><b>Tidak ada barang</b>' +
+          (q ? 'Coba kata kunci lain.' : 'Jalankan sinkronisasi untuk mengambil data dari pusat.') +
+          '</div>';
+        return;
+      }
+
+      document.getElementById('pr-list').innerHTML =
+        '<div class="table-wrap"><table><thead><tr>' +
+          '<th>Kode</th><th>Nama barang</th><th class="num">Harga</th>' +
+          '<th class="num">Stok cabang</th><th>Cabang lain</th><th>SN</th>' +
+        '</tr></thead><tbody>' +
+        d.list.map(function (p) {
+          return '<tr' + (p.demo ? ' style="opacity:.6"' : '') + '>' +
+            '<td><b class="mono">' + Fmt.esc(p.product_code) + '</b>' +
+              (p.demo ? ' <span class="badge warn">contoh</span>' : '') + '</td>' +
+            '<td>' + Fmt.esc(p.product_name) +
+              (p.unit ? '<div class="small muted">' + Fmt.esc(p.unit) + '</div>' : '') + '</td>' +
+            '<td class="num mono">' + Fmt.rp(p.price) + '</td>' +
+            '<td class="num mono">' + (p.stock === '' ? '—' : Fmt.angka(p.stock)) + '</td>' +
+            '<td class="small">' + (p.stock_other
+              ? '<span style="color:var(--brand)">' + Fmt.esc(p.stock_other) + '</span>'
+              : '<span class="muted">—</span>') + '</td>' +
+            '<td>' + (p.need_sn ? '<span class="badge">Perlu SN</span>' : '<span class="muted small">—</span>') + '</td>' +
+          '</tr>';
+        }).join('') + '</tbody></table></div>' +
+        (d.total > d.list.length
+          ? '<div class="small muted mt8">Ditampilkan 200 teratas dari ' +
+            Fmt.angka(d.total) + '. Persempit pencarian untuk melihat sisanya.</div>' : '') +
+        '<div class="small muted mt8">Angka stok adalah salinan dari pusat pada waktu sinkronisasi terakhir, ' +
+          'bukan stok saat ini. Gudang tetap pemutus akhir. Kolom Cabang lain hanya informasi ' +
+          'untuk menawarkan pesan dari cabang yang masih punya barangnya.</div>';
+
+    }).catch(function (e) {
+      document.getElementById('pr-list').innerHTML =
+        '<div class="empty"><b>Data tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  },
+
+  sync: function (btn) {
+    var P = App.pages.produk;
+    btnBusy(btn, true, 'Menyinkronkan');
+
+    api('apiSyncProduk', { idem: uid() }).then(function (d) {
+      btnBusy(btn, false, 'Sinkronkan sekarang');
+      toast(d.message, 'ok', 'Sinkronisasi berhasil');
+      P.load();
+    }).catch(function (e) {
+      btnBusy(btn, false, 'Sinkronkan sekarang');
+      Modal.open({
+        title: 'Sinkronisasi gagal',
+        sub: 'Data barang yang lama tetap aman, tidak ada yang terhapus.',
+        okText: 'Mengerti', cancel: false,
+        body: '<div class="small" style="background:var(--danger-soft);padding:11px 13px;' +
+              'border-radius:10px;color:var(--danger)">' + Fmt.esc(e.message) + '</div>'
+      });
+      P.load();
+    });
+  }
+};
+</script>

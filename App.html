@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <base target="_top">
+  <?!= include('Styles'); ?>
+</head>
+<body>
+
+  <div id="app">
+    <!--
+      Layar paling awal, sebelum satu baris kode pun berjalan.
+
+      Dibuat sama persis dengan layar muat berikutnya — ikon gedung,
+      nama toko, garis muat. Dulu bentuknya berbeda, jadi yang
+      terlihat dua layar berturut-turut: garis jingga polos dulu,
+      baru yang ada ikonnya.
+    -->
+    <div class="splash">
+      <div class="splash-logo">
+        <svg viewBox="0 0 48 48" width="58" height="58" aria-hidden="true">
+          <path d="M6 40V20l10-7 10 7v20" fill="none" stroke="currentColor"
+            stroke-width="2.6" stroke-linejoin="round"/>
+          <path d="M26 40V14l8-5 8 5v26" fill="none" stroke="currentColor"
+            stroke-width="2.6" stroke-linejoin="round"/>
+          <path d="M12 40v-9h8v9M32 40v-7h6v7" fill="none" stroke="currentColor"
+            stroke-width="2.6" stroke-linejoin="round"/>
+          <path d="M3 40h42" stroke="currentColor" stroke-width="2.6"
+            stroke-linecap="round"/>
+        </svg>
+      </div>
+      <b><?= companyName ?></b>
+      <span>Menyiapkan layar…</span>
+      <div class="splash-bar"><i></i></div>
+    </div>
+  </div>
+
+  <div id="toasts"></div>
+  <div id="modal-root"></div>
+
+  <script>
+    window.APP_META = {
+      version: '<?= appVersion ?>',
+      company: '<?= companyName ?>',
+      brand:   '<?= brandColor ?>'
+    };
+  </script>
+
+  <?!= include('JsCore'); ?>
+  <?!= include('Comp_Barang'); ?>
+  <?!= include('Comp_Resep'); ?>
+  <?!= include('Comp_Chat'); ?>
+  <?!= include('Page_Pesan'); ?>
+  <?!= include('Page_Menu'); ?>
+  <?!= include('Page_Omset'); ?>
+  <?!= include('Page_Login'); ?>
+  <?!= include('Page_Home'); ?>
+  <?!= include('Page_Users'); ?>
+  <?!= include('Page_Audit'); ?>
+  <?!= include('Page_Order'); ?>
+  <?!= include('Page_MyTrx'); ?>
+  <?!= include('Page_Customers'); ?>
+  <?!= include('Page_Gudang'); ?>
+  <?!= include('Page_Admin'); ?>
+  <?!= include('Page_Produk'); ?>
+  <?!= include('Page_Kasir'); ?>
+  <?!= include('Page_Teknisi'); ?>
+  <?!= include('Page_Notif'); ?>
+  <?!= include('Page_Laporan'); ?>
+  <?!= include('Page_QR'); ?>
+  <?!= include('Page_Indent'); ?>
+  <?!= include('Page_Ganti'); ?>
+  <?!= include('Page_Pantau'); ?>
+  <?!= include('Page_Sn'); ?>
+  <?!= include('Page_TechReport'); ?>
+  <?!= include('Page_Serah'); ?>
+  <?!= include('Page_Etc'); ?>
+
+  <script>App.start();</script>
+</body>
+</html>

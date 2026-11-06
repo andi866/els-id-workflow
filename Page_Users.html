@@ -1,0 +1,618 @@
+<script>
+/* ============================================================
+   Halaman Kelola User — v2
+   Ditambah pengelolaan daftar kode sales.
+
+   Dua daftar yang berbeda:
+   - Akun login  : dipakai untuk masuk aplikasi, dibuat per divisi
+   - Kode sales  : nama orang yang menjual, dipilih saat buat pesanan
+   ============================================================ */
+App.pages.users = {
+  title: 'Kelola User',
+  data: [],
+  sales: [],
+  typeMap: {},
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<div class="between">' +
+          '<div><h3>Akun login</h3>' +
+            '<p class="hint mb0">Dipakai untuk masuk aplikasi. Role menentukan menu yang muncul.</p></div>' +
+          '<button class="btn" id="u-add">Tambah akun</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt16" id="u-list"><div class="empty">Memuat data…</div></div>' +
+
+      '<div class="card mt16" style="margin-top:32px">' +
+        '<div class="between">' +
+          '<div><h3>Daftar sales</h3>' +
+            '<p class="hint mb0">Nama orang yang menjual, dipilih saat membuat pesanan. ' +
+              'Ini bukan akun login — satu akun divisi bisa dipakai mencatat penjualan banyak sales. ' +
+              'Jalur penjualan dibaca dari huruf tengah kodenya.</p></div>' +
+          '<button class="btn" id="s-add">Tambah sales</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt16" id="s-list"><div class="empty">Memuat data…</div></div>' +
+
+      '<div class="card mt16"><div class="between">' +
+        '<div><h3 class="mb0">Petugas Gudang</h3>' +
+        '<p class="hint mb0">Nama orang yang menyiapkan barang. Dipilih saat konfirmasi ' +
+        'barang siap, lalu tercatat di riwayat transaksi.</p></div>' +
+        '<button class="btn" id="g-add">Tambah petugas</button>' +
+      '</div></div>' +
+      '<div class="mt16" id="g-list"><div class="empty">Memuat data…</div></div>';
+  },
+
+  mount: function () {
+    document.getElementById('u-add').onclick = App.pages.users.formAdd;
+    document.getElementById('s-add').onclick = function () { App.pages.users.formSales(null); };
+    App.pages.users.load();
+    App.pages.users.loadSales();
+
+    document.getElementById('g-add').onclick = function () { App.pages.users.formGudang(null); };
+    App.pages.users.loadGudang();
+  },
+
+  /* ---------------- AKUN ---------------- */
+
+  load: function () {
+    api('apiListUsers', {}).then(function (rows) {
+      App.pages.users.data = rows;
+      App.pages.users.draw();
+    }).catch(function (e) {
+      document.getElementById('u-list').innerHTML =
+        '<div class="empty"><b>Data tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  },
+
+  draw: function () {
+    var rows = App.pages.users.data;
+    if (!rows.length) {
+      document.getElementById('u-list').innerHTML =
+        '<div class="empty"><b>Belum ada akun lain</b>Tambahkan akun Sales dan Gudang dulu untuk menguji alur.</div>';
+      return;
+    }
+
+    var body = rows.map(function (u) {
+      var mark = u.status === 'ACTIVE' ? 'on' : (u.status === 'SUSPENDED' ? 'hold' : 'off');
+      var badge = u.status === 'ACTIVE' ? '<span class="badge ok">Aktif</span>'
+                : u.status === 'SUSPENDED' ? '<span class="badge warn">Terkunci</span>'
+                : '<span class="badge danger">Nonaktif</span>';
+      return '<tr class="row-mark ' + mark + '">' +
+        '<td><b>' + Fmt.esc(u.full_name) + '</b><div class="small muted">' +
+          Fmt.esc(u.username) + ' · ' + Fmt.esc(u.user_id) + '</div></td>' +
+        '<td>' + Fmt.esc(Fmt.roleLabel(u.role)) + '</td>' +
+        '<td>' + Fmt.esc(Fmt.branchLabel(u.branch)) + '</td>' +
+        '<td>' + badge + (u.must_change_pin ? ' <span class="badge">PIN awal</span>' : '') + '</td>' +
+        '<td class="small muted">' + Fmt.esc(Fmt.jam(u.last_login_at)) + '</td>' +
+        '<td><div class="inline">' +
+          '<button class="btn sm ghost" data-act="edit" data-id="' + u.user_id + '">Ubah</button>' +
+          '<button class="btn sm ghost" data-act="pin" data-id="' + u.user_id + '">Reset PIN</button>' +
+          '<button class="btn sm ghost" data-act="hapus" data-id="' + u.user_id + '" ' +
+            'style="color:var(--danger)">Hapus</button>' +
+        '</div></td></tr>';
+    }).join('');
+
+    document.getElementById('u-list').innerHTML =
+      '<div class="table-wrap"><table><thead><tr>' +
+        '<th>Nama</th><th>Role</th><th>Cabang</th><th>Status</th><th>Login terakhir</th><th></th>' +
+      '</tr></thead><tbody>' + body + '</tbody></table></div>';
+
+    document.getElementById('u-list').onclick = function (e) {
+      var b = e.target.closest('button[data-act]'); if (!b) return;
+      var u = App.pages.users.data.filter(function (x) { return x.user_id === b.dataset.id; })[0];
+      if (!u) return;
+      if (b.dataset.act === 'edit') App.pages.users.formEdit(u);
+      if (b.dataset.act === 'pin') App.pages.users.formPin(u);
+      if (b.dataset.act === 'hapus') App.pages.users.formHapus(u);
+    };
+  },
+
+  /**
+   * Menghapus akun.
+   *
+   * Akun yang pernah dipakai tidak benar-benar dihapus, hanya
+   * dinonaktifkan — supaya namanya tetap terbaca di riwayat transaksi
+   * lama. Yang belum pernah dipakai dihapus betulan.
+   *
+   * Sistem yang memutuskan mana yang berlaku, bukan Admin.
+   */
+  /**
+   * Menghapus kode sales.
+   *
+   * Kode yang pernah dipakai bertransaksi hanya dinonaktifkan, karena
+   * laporan penjualan per sales dihitung dari kode itu. Kalau dihapus,
+   * penjualan bulan-bulan sebelumnya ikut hilang dari laporan.
+   */
+  gudang: [],
+
+  loadGudang: function () {
+    api('apiListPetugasGudang', { semua: true }).then(function (rows) {
+      App.pages.users.gudang = rows;
+
+      if (!rows.length) {
+        document.getElementById('g-list').innerHTML =
+          '<div class="empty"><b>Belum ada petugas gudang</b>' +
+          'Selama daftarnya kosong, konfirmasi barang siap tetap bisa dilakukan tanpa memilih nama.' +
+          '</div>';
+        return;
+      }
+
+      document.getElementById('g-list').innerHTML =
+        '<div class="table-wrap"><table><thead><tr>' +
+          '<th>Kode</th><th>Nama</th><th>Cabang</th><th>Status</th><th></th>' +
+        '</tr></thead><tbody>' +
+        rows.map(function (g) {
+          return '<tr data-code="' + Fmt.esc(g.gudang_code) + '" style="cursor:pointer">' +
+            '<td><b class="mono">' + Fmt.esc(g.gudang_code) + '</b></td>' +
+            '<td>' + Fmt.esc(g.gudang_name) + '</td>' +
+            '<td class="small">' + Fmt.esc(g.branch) + '</td>' +
+            '<td>' + (g.is_active
+              ? '<span class="badge ok">Aktif</span>'
+              : '<span class="badge danger">Nonaktif</span>') + '</td>' +
+            '<td><button class="btn sm ghost">Ubah</button></td></tr>';
+        }).join('') + '</tbody></table></div>';
+
+      document.getElementById('g-list').onclick = function (e) {
+        var tr = e.target.closest('tr[data-code]'); if (!tr) return;
+        var g = App.pages.users.gudang.filter(function (x) {
+          return x.gudang_code === tr.dataset.code;
+        })[0];
+        if (g) App.pages.users.formGudang(g);
+      };
+    }).catch(function (e) {
+      document.getElementById('g-list').innerHTML =
+        '<div class="empty"><b>Daftar petugas gudang belum ada</b>' + Fmt.esc(e.message) +
+        '<div class="small mt8">Jalankan fungsi siapkanDaftarGudang() dari editor Apps Script.</div></div>';
+    });
+  },
+
+  formGudang: function (g) {
+    var baru = !g;
+    Modal.open({
+      title: baru ? 'Tambah petugas gudang' : 'Ubah ' + g.gudang_code,
+      sub: baru ? 'Kode dipakai sistem, nama yang tampil di layar dan riwayat.' : '',
+      okText: baru ? 'Simpan petugas' : 'Simpan perubahan',
+      body:
+        (baru
+          ? '<div class="field"><label>Kode petugas</label>' +
+            '<input type="text" id="g-code" class="mono" placeholder="GDG-PWT-RUDI">' +
+            '<div class="note">Huruf besar, angka, dan strip. Contoh: GDG-PWT-RUDI.</div></div>'
+          : '<div class="between"><span class="muted">Kode</span><b class="mono">' +
+            Fmt.esc(g.gudang_code) + '</b></div><div class="sep"></div>') +
+        '<div class="field"><label>Nama petugas</label>' +
+          '<input type="text" id="g-name" value="' + Fmt.esc(baru ? '' : g.gudang_name) + '"></div>' +
+        '<div class="field"><label>Cabang</label><select id="g-branch">' +
+          App.pages.users.branchOptions(baru ? 'PWT_KOTA' : g.branch) + '</select></div>' +
+        (baru ? '' :
+        '<div class="field mb0"><label>Status</label><select id="g-active">' +
+          '<option value="1"' + (g.is_active ? ' selected' : '') + '>Aktif</option>' +
+          '<option value="0"' + (g.is_active ? '' : ' selected') + '>Nonaktif</option></select>' +
+          '<div class="note">Petugas nonaktif tidak muncul lagi saat menyiapkan barang, ' +
+          'tapi catatan penyiapan lamanya tetap terbaca atas namanya.</div></div>' +
+        '<div class="sep"></div>' +
+        '<button class="btn sm ghost" id="g-hapus" style="color:var(--danger)">' +
+          'Hapus petugas ini</button>'),
+
+      onMount: function () {
+        var h = document.getElementById('g-hapus');
+        if (h) h.onclick = function () { App.pages.users.hapusGudang(g); };
+      },
+
+      onOk: function (close, btn) {
+        var d = {
+          gudang_code: baru ? document.getElementById('g-code').value.trim().toUpperCase()
+                            : g.gudang_code,
+          gudang_name: document.getElementById('g-name').value.trim(),
+          branch: document.getElementById('g-branch').value
+        };
+        if (!baru) d.is_active = document.getElementById('g-active').value === '1';
+
+        btnBusy(btn, true);
+        api('apiSavePetugasGudang', { data: d }).then(function () {
+          close();
+          toast(baru ? 'Petugas ditambahkan.' : 'Perubahan disimpan.', 'ok');
+          App.pages.users.loadGudang();
+        }).catch(function (e) {
+          btnBusy(btn, false, baru ? 'Simpan petugas' : 'Simpan perubahan');
+          toast(e.message, 'err');
+        });
+      }
+    });
+  },
+
+  hapusGudang: function (g) {
+    Modal.open({
+      title: 'Hapus ' + g.gudang_code + '?',
+      sub: 'Kode yang pernah dipakai menyiapkan barang akan dinonaktifkan, bukan dihapus, ' +
+           'supaya catatan penyiapan lama tetap terbaca namanya.',
+      okText: 'Ya, hapus', danger: true,
+      body: '<div class="between"><span class="muted">Nama</span><b>' +
+              Fmt.esc(g.gudang_name) + '</b></div>' +
+            '<div class="sep"></div>' +
+            '<div class="field mb0"><label>Alasan</label>' +
+            '<input type="text" id="g-hapusalasan" placeholder="contoh: sudah pindah cabang"></div>',
+      onOk: function (close, btn) {
+        btnBusy(btn, true);
+        var el = document.getElementById('g-hapusalasan');
+        api('apiDeletePetugasGudang', { gudang_code: g.gudang_code, reason: el ? el.value : '' })
+          .then(function (r) {
+            close();
+            toast(r.pesan, 'ok', r.mode === 'HAPUS' ? 'Kode dihapus' : 'Kode dinonaktifkan');
+            App.pages.users.loadGudang();
+          }).catch(function (e) {
+            btnBusy(btn, false, 'Ya, hapus');
+            toast(e.message, 'err');
+          });
+      }
+    });
+  },
+
+  hapusSales: function (s) {
+    Modal.open({
+      title: 'Hapus ' + s.sales_code + '?',
+      sub: 'Kode yang pernah dipakai bertransaksi akan dinonaktifkan, bukan dihapus, ' +
+           'supaya penjualan lamanya tetap terhitung di laporan.',
+      okText: 'Ya, hapus', danger: true,
+      body:
+        '<div class="between"><span class="muted">Nama</span><b>' +
+          Fmt.esc(s.sales_name) + '</b></div>' +
+        '<div class="between mt8"><span class="muted">Jalur</span><b>' +
+          Fmt.esc(s.type_label || s.sales_type || '—') + '</b></div>' +
+        '<div class="sep"></div>' +
+        '<div class="field mb0"><label>Alasan</label>' +
+          '<input type="text" id="s-hapusalasan" placeholder="contoh: sudah tidak bertugas di Purwokerto"></div>',
+      onOk: function (close, btn) {
+        btnBusy(btn, true);
+        var el = document.getElementById('s-hapusalasan');
+        api('apiDeleteSales', { sales_code: s.sales_code, reason: el ? el.value : '' })
+          .then(function (r) {
+            close();
+            Modal.tutupSemua && Modal.tutupSemua();
+            toast(r.pesan, 'ok', r.mode === 'HAPUS' ? 'Kode dihapus' : 'Kode dinonaktifkan');
+            App.pages.users.loadSales();
+
+            /*
+             * Kalau cuma dinonaktifkan karena sudah dipakai, ditawarkan
+             * menghapusnya betulan.
+             *
+             * Menonaktifkan adalah pilihan yang benar untuk kebanyakan
+             * keadaan — nama itu menempel pada transaksi lama. Tapi
+             * kode yang salah ketik memang perlu hilang, dan selama
+             * ini tidak ada jalannya sama sekali.
+             */
+            if (!r.bisa_paksa) return;
+
+            Modal.confirm('Hapus permanen juga?',
+              r.jumlahTrx + ' transaksi memakai kode ini. Kalau dihapus permanen, ' +
+              'transaksi itu tetap menyimpan namanya sendiri — tapi kodenya hilang ' +
+              'dari daftar dan tidak bisa dikembalikan.',
+              'Ya, hapus permanen', function () {
+                api('apiDeleteSales', {
+                  sales_code: s.sales_code, paksa: true,
+                  reason: (el ? el.value : '') || 'Hapus permanen'
+                }).then(function (r2) {
+                  toast(r2.pesan, 'ok', 'Kode dihapus permanen');
+                  App.pages.users.loadSales();
+                }).catch(function (e2) { toast(e2.message, 'err'); });
+              }, true);
+
+          }).catch(function (e) {
+            btnBusy(btn, false, 'Ya, hapus');
+            toast(e.message, 'err');
+          });
+      }
+    });
+  },
+
+  formHapus: function (u) {
+    Modal.open({
+      title: 'Hapus akun ' + u.full_name + '?',
+      sub: 'Akun yang sudah pernah dipakai akan dinonaktifkan, bukan dihapus, ' +
+           'supaya namanya tetap terbaca di riwayat transaksi lama.',
+      okText: 'Ya, hapus akun', danger: true,
+      body:
+        '<div class="between"><span class="muted">Username</span><b class="mono">' +
+          Fmt.esc(u.username) + '</b></div>' +
+        '<div class="between mt8"><span class="muted">Role</span><b>' +
+          Fmt.esc(Fmt.roleLabel(u.role)) + '</b></div>' +
+        '<div class="between mt8"><span class="muted">Login terakhir</span><b>' +
+          Fmt.esc(u.last_login_at ? Fmt.jamSaja(u.last_login_at) : 'belum pernah') + '</b></div>' +
+        '<div class="sep"></div>' +
+        '<div class="field mb0"><label>Alasan</label>' +
+          '<input type="text" id="u-hapusalasan" placeholder="contoh: staf sudah tidak bekerja di sini"></div>',
+      onOk: function (close, btn) {
+        btnBusy(btn, true);
+        var el = document.getElementById('u-hapusalasan');
+        api('apiDeleteUser', { user_id: u.user_id, reason: el ? el.value : '' })
+          .then(function (r) {
+            close();
+            toast(r.pesan, 'ok', r.mode === 'HAPUS' ? 'Akun dihapus' : 'Akun dinonaktifkan');
+            App.pages.users.load();
+
+            /*
+             * Akun yang cuma bisa dinonaktifkan ditawarkan dihapus
+             * betulan.
+             *
+             * Menonaktifkan benar untuk akun yang pernah dipakai —
+             * namanya menempel di riwayat. Tapi akun yang salah
+             * dibuat memang perlu hilang, dan selama ini tidak ada
+             * jalannya sama sekali.
+             */
+            if (!r.bisa_paksa) return;
+
+            Modal.confirm('Hapus permanen juga?',
+              'Akun ini pernah meninggalkan jejak, jadi hanya dinonaktifkan. ' +
+              'Kalau memang salah dibuat, bisa dihapus permanen — riwayat lamanya ' +
+              'tetap menyimpan namanya, tapi akunnya hilang dan tidak bisa ' +
+              'dikembalikan.',
+              'Ya, hapus permanen', function () {
+                api('apiDeleteUser', {
+                  user_id: u.user_id, paksa: true,
+                  reason: (el ? el.value : '') || 'Hapus permanen'
+                }).then(function (r2) {
+                  toast(r2.pesan, 'ok', 'Akun dihapus permanen');
+                  App.pages.users.load();
+                }).catch(function (e2) { toast(e2.message, 'err'); });
+              }, true);
+
+          }).catch(function (e) {
+            btnBusy(btn, false, 'Ya, hapus akun');
+            toast(e.message, 'err');
+          });
+      }
+    });
+  },
+
+  roleOptions: function (sel) {
+    return ['SALES','SALES_ONLINE','GUDANG','EKSEKUSI','ADMIN','KASIR',
+            'TEKNISI','SUPERADMIN'].map(function (r) {
+      return '<option value="' + r + '"' + (r === sel ? ' selected' : '') + '>' + Fmt.roleLabel(r) + '</option>';
+    }).join('');
+  },
+
+  branchOptions: function (sel) {
+    return ['PWT_KOTA','PURBALINGGA','KEBUMEN'].map(function (b) {
+      return '<option value="' + b + '"' + (b === sel ? ' selected' : '') + '>' + Fmt.branchLabel(b) + '</option>';
+    }).join('');
+  },
+
+  formAdd: function () {
+    Modal.open({
+      title: 'Tambah akun',
+      sub: 'Akun ini dipakai untuk masuk aplikasi. Buat satu akun per divisi kalau dipakai bergantian.',
+      okText: 'Simpan akun',
+      body:
+        '<div class="field"><label>Nama tampilan</label><input type="text" id="f-name" placeholder="Sales Purwokerto"></div>' +
+        '<div class="field"><label>Username</label><input type="text" id="f-user" autocapitalize="none" placeholder="sales">' +
+          '<div class="note">Huruf kecil tanpa spasi, 3–20 karakter.</div></div>' +
+        '<div class="field"><label>Role</label><select id="f-role">' + App.pages.users.roleOptions('SALES') + '</select></div>' +
+
+        /*
+         * Akun bisa ditautkan ke satu nama sales.
+         *
+         * Diisi kalau akunnya milik satu orang: namanya terpasang
+         * sendiri di tiap pesanan, dan yang terlihat olehnya cuma
+         * penjualannya sendiri. Dikosongkan berarti akun divisi
+         * yang dipakai bersama, seperti selama ini.
+         */
+        '<div class="field"><label>Kode sales (opsional)</label>' +
+          '<input type="text" id="f-sales" placeholder="contoh: SPW-R-RIRIH">' +
+          '<div class="note">Isi kalau akun ini milik satu orang sales. ' +
+          'Dikosongkan berarti akun divisi yang dipakai bersama.</div></div>' +
+        '<div class="field"><label>Cabang</label><select id="f-branch">' + App.pages.users.branchOptions('PWT_KOTA') + '</select></div>' +
+        '<div class="field"><label>Nomor WhatsApp</label><input type="tel" id="f-phone" placeholder="0812…"></div>' +
+        '<div class="field mb0"><label>PIN awal</label><input type="text" id="f-pin" inputmode="numeric" maxlength="6" placeholder="6 digit angka">' +
+          '<div class="note">Beri tahu secara langsung, bukan lewat grup.</div></div>',
+      onOk: function (close, btn) {
+        var d = {
+          full_name: document.getElementById('f-name').value.trim(),
+          username: document.getElementById('f-user').value.trim().toLowerCase(),
+          role: document.getElementById('f-role').value,
+          branch: document.getElementById('f-branch').value,
+          phone: document.getElementById('f-phone').value.trim(),
+          sales_code: (document.getElementById('f-sales') || {}).value || '',
+          pin: document.getElementById('f-pin').value.trim()
+        };
+        btnBusy(btn, true);
+        api('apiCreateUser', { data: d }).then(function () {
+          close();
+          toast(d.full_name + ' ditambahkan sebagai ' + Fmt.roleLabel(d.role) + '.', 'ok');
+          App.pages.users.load();
+        }).catch(function (e) {
+          btnBusy(btn, false, 'Simpan akun');
+          toast(e.message, 'err');
+        });
+      }
+    });
+  },
+
+  formEdit: function (u) {
+    Modal.open({
+      title: 'Ubah ' + u.full_name,
+      sub: 'Setiap perubahan tercatat di audit log.',
+      okText: 'Simpan perubahan',
+      body:
+        '<div class="field"><label>Nama tampilan</label><input type="text" id="e-name" value="' + Fmt.esc(u.full_name) + '"></div>' +
+        '<div class="field"><label>Role</label><select id="e-role">' + App.pages.users.roleOptions(u.role) + '</select></div>' +
+        '<div class="field"><label>Cabang</label><select id="e-branch">' + App.pages.users.branchOptions(u.branch) + '</select></div>' +
+        '<div class="field"><label>Nomor WhatsApp</label><input type="tel" id="e-phone" value="' + Fmt.esc(u.phone || '') + '"></div>' +
+        '<div class="field"><label>Status akun</label><select id="e-status">' +
+          ['ACTIVE','SUSPENDED','RESIGNED'].map(function (s) {
+            var lbl = { ACTIVE: 'Aktif', SUSPENDED: 'Terkunci', RESIGNED: 'Sudah tidak bekerja' }[s];
+            return '<option value="' + s + '"' + (s === u.status ? ' selected' : '') + '>' + lbl + '</option>';
+          }).join('') + '</select>' +
+          '<div class="note">Mengunci akun langsung memutus sesi yang sedang berjalan.</div></div>' +
+        '<div class="field mb0"><label>Alasan perubahan</label><input type="text" id="e-reason" placeholder="opsional"></div>',
+      onOk: function (close, btn) {
+        var d = {
+          user_id: u.user_id,
+          full_name: document.getElementById('e-name').value.trim(),
+          role: document.getElementById('e-role').value,
+          branch: document.getElementById('e-branch').value,
+          phone: document.getElementById('e-phone').value.trim(),
+          status: document.getElementById('e-status').value,
+          reason: document.getElementById('e-reason').value.trim()
+        };
+        btnBusy(btn, true);
+        api('apiUpdateUser', { data: d }).then(function (r) {
+          close();
+          toast(r.changed ? 'Perubahan disimpan.' : 'Tidak ada yang berubah.', r.changed ? 'ok' : '');
+          App.pages.users.load();
+        }).catch(function (e) {
+          btnBusy(btn, false, 'Simpan perubahan');
+          toast(e.message, 'err');
+        });
+      }
+    });
+  },
+
+  formPin: function (u) {
+    Modal.open({
+      title: 'Reset PIN ' + u.full_name,
+      sub: 'Sesi yang sedang berjalan akan diputus. PIN wajib diganti saat login berikutnya.',
+      okText: 'Reset PIN', danger: true,
+      body:
+        '<div class="field"><label>PIN baru</label>' +
+          '<input type="text" id="r-pin" inputmode="numeric" maxlength="6" placeholder="6 digit angka"></div>' +
+        '<div class="field mb0"><label>Alasan</label>' +
+          '<input type="text" id="r-reason" placeholder="contoh: staf lupa PIN"></div>',
+      onOk: function (close, btn) {
+        btnBusy(btn, true);
+        api('apiResetUserPin', {
+          user_id: u.user_id,
+          newPin: document.getElementById('r-pin').value.trim(),
+          reason: document.getElementById('r-reason').value.trim()
+        }).then(function () {
+          close();
+          toast('PIN ' + u.full_name + ' sudah direset.', 'ok');
+          App.pages.users.load();
+        }).catch(function (e) {
+          btnBusy(btn, false, 'Reset PIN');
+          toast(e.message, 'err');
+        });
+      }
+    });
+  },
+
+  /* ---------------- DAFTAR SALES ---------------- */
+
+  loadSales: function () {
+    api('apiListSales', { includeInactive: true }).then(function (d) {
+      App.pages.users.sales = d.list || [];
+      App.pages.users.typeMap = d.typeMap || {};
+      App.pages.users.drawSales();
+    }).catch(function (e) {
+      document.getElementById('s-list').innerHTML =
+        '<div class="empty"><b>Daftar sales belum ada</b>' + Fmt.esc(e.message) +
+        '<div class="small mt8">Jalankan fungsi siapkanDaftarSales() dari editor Apps Script.</div></div>';
+    });
+  },
+
+  drawSales: function () {
+    var rows = App.pages.users.sales;
+    if (!rows.length) {
+      document.getElementById('s-list').innerHTML =
+        '<div class="empty"><b>Belum ada kode sales</b>Tambahkan lewat tombol di atas.</div>';
+      return;
+    }
+
+    document.getElementById('s-list').innerHTML =
+      '<div class="table-wrap"><table><thead><tr>' +
+        '<th>Kode</th><th>Nama</th><th>Jalur</th><th>Cabang</th><th>Status</th><th></th>' +
+      '</tr></thead><tbody>' +
+      rows.map(function (s) {
+        return '<tr class="row-mark ' + (s.is_active ? 'on' : 'off') + '" ' +
+          'data-code="' + Fmt.esc(s.sales_code) + '">' +
+          '<td><b class="mono">' + Fmt.esc(s.sales_code) + '</b></td>' +
+          '<td>' + Fmt.esc(s.sales_name) + '</td>' +
+          '<td><span class="badge brand">' + Fmt.esc(s.type_label || 'Lainnya') + '</span></td>' +
+          '<td class="small">' + Fmt.esc(Fmt.branchLabel(s.branch)) + '</td>' +
+          '<td>' + (s.is_active ? '<span class="badge ok">Aktif</span>'
+                                : '<span class="badge danger">Nonaktif</span>') + '</td>' +
+          '<td><button class="btn sm ghost">Ubah</button></td></tr>';
+      }).join('') + '</tbody></table></div>';
+
+    document.getElementById('s-list').onclick = function (e) {
+      var tr = e.target.closest('tr[data-code]'); if (!tr) return;
+      var s = App.pages.users.sales.filter(function (x) { return x.sales_code === tr.dataset.code; })[0];
+      if (s) App.pages.users.formSales(s);
+    };
+  },
+
+  formSales: function (s) {
+    var baru = !s;
+    Modal.open({
+      title: baru ? 'Tambah sales' : 'Ubah ' + s.sales_code,
+      sub: baru ? 'Kode ini yang dipilih Sales saat membuat pesanan, dan yang dipakai menghitung penjualan per orang.'
+                : 'Kode tidak bisa diubah. Kalau salah, nonaktifkan lalu buat yang baru — supaya transaksi lama tetap terbaca.',
+      okText: baru ? 'Simpan sales' : 'Simpan perubahan',
+      onMount: function () {
+        var map = App.pages.users.typeMap || {};
+        var note = document.getElementById('s-type-note');
+        var kode = document.getElementById('s-code');
+
+        var tampil = function () {
+          var bagian = String(kode.value || '').toUpperCase().split('-');
+          var huruf = bagian.length >= 3 ? bagian[1].trim() : '';
+          if (!huruf) {
+            note.innerHTML = 'Jalur terbaca: <b>—</b>';
+          } else if (map[huruf]) {
+            note.innerHTML = 'Jalur terbaca: <b>' + Fmt.esc(map[huruf]) + '</b>';
+            note.style.color = '';
+          } else {
+            note.innerHTML = 'Huruf "' + Fmt.esc(huruf) + '" belum terdaftar di pengaturan ' +
+              'SALES_TYPE_MAP. Tetap bisa disimpan, tapi laporannya masuk kelompok Lainnya.';
+            note.style.color = 'var(--warn)';
+          }
+        };
+        tampil();
+        if (!kode.disabled) kode.oninput = tampil;
+      },
+      body:
+        '<div class="field"><label>Kode sales</label>' +
+          '<input type="text" id="s-code" ' + (baru ? '' : 'disabled') + ' value="' +
+          Fmt.esc(baru ? '' : s.sales_code) + '" placeholder="SPW-O-MANTO" style="text-transform:uppercase">' +
+          (baru ? '<div class="note">Pola: TIM - JALUR - NAMA. Contoh: SPW-R-RIRIH</div>' : '') +
+          '<div class="note" id="s-type-note"></div></div>' +
+        '<div class="field"><label>Nama</label><input type="text" id="s-name" value="' +
+          Fmt.esc(baru ? '' : s.sales_name) + '" placeholder="Manto"></div>' +
+        '<div class="field"><label>Cabang</label><select id="s-branch">' +
+          App.pages.users.branchOptions(baru ? 'PWT_KOTA' : s.branch) + '</select></div>' +
+        (baru ? '' :
+        '<div class="field mb0"><label>Status</label><select id="s-active">' +
+          '<option value="1"' + (s.is_active ? ' selected' : '') + '>Aktif</option>' +
+          '<option value="0"' + (s.is_active ? '' : ' selected') + '>Nonaktif</option></select>' +
+          '<div class="note">Sales nonaktif tidak muncul lagi saat membuat pesanan, ' +
+          'tapi transaksi lamanya tetap tercatat atas namanya.</div></div>' +
+        '<div class="sep"></div>' +
+        '<button class="btn sm ghost" id="s-hapus" style="color:var(--danger)">' +
+          'Hapus kode sales ini</button>'),
+      onMount: function () {
+        var h = document.getElementById('s-hapus');
+        if (!h) return;
+        h.onclick = function () { App.pages.users.hapusSales(s); };
+      },
+      onOk: function (close, btn) {
+        var d = {
+          sales_code: baru ? document.getElementById('s-code').value.trim().toUpperCase() : s.sales_code,
+          sales_name: document.getElementById('s-name').value.trim(),
+          branch: document.getElementById('s-branch').value
+        };
+        if (!baru) d.is_active = document.getElementById('s-active').value === '1';
+
+        btnBusy(btn, true);
+        api('apiSaveSales', { data: d }).then(function () {
+          close();
+          toast(baru ? 'Sales ditambahkan.' : 'Perubahan disimpan.', 'ok');
+          App.pages.users.loadSales();
+        }).catch(function (e) {
+          btnBusy(btn, false, baru ? 'Simpan sales' : 'Simpan perubahan');
+          toast(e.message, 'err');
+        });
+      }
+    });
+  }
+};
+</script>

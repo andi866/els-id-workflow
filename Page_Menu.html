@@ -1,0 +1,322 @@
+<script>
+/* ============================================================
+   ATUR MENU
+
+   Dua tingkat dalam satu layar, dipisah tab:
+
+     Menu saya    — urutan yang berlaku untuk akun yang sedang
+                    dipakai. Tiap orang punya kebiasaan sendiri.
+
+     Per divisi   — menu apa saja yang boleh dilihat sebuah
+                    divisi. Hanya Super Admin.
+
+   Dipakai tombol naik-turun, bukan geser-tarik. Geser-tarik enak
+   di layar lebar tapi menyiksa di HP, dan sebagian besar orang
+   mengaturnya dari HP.
+   ============================================================ */
+App.pages.menu = {
+  title: 'Atur Menu',
+  tab: 'saya',
+  peran: null,
+  daftar: [],
+  mati: [],
+
+  /** Nama menu yang terbaca orang, diambil dari daftar menu perannya */
+  namaMenu: function (k, peran) {
+    var sumber = NAV[peran || App.state.session.role] || [];
+    var hasil = null;
+
+    // Menu sisipan punya namanya sendiri
+    if (k === 'omset') return { k: 'omset', i: '💰', t: 'Omzet Saya' };
+
+    sumber.forEach(function (x) {
+      if (x.grup) {
+        (x.items || []).forEach(function (y) { if (y.k === k) hasil = y; });
+      } else if (x.k === k) hasil = x;
+    });
+
+    // Menu dari divisi lain tetap perlu nama saat Super Admin mengaturnya
+    if (!hasil) {
+      Object.keys(NAV).forEach(function (r) {
+        (NAV[r] || []).forEach(function (x) {
+          if (x.grup) {
+            (x.items || []).forEach(function (y) { if (y.k === k && !hasil) hasil = y; });
+          } else if (x.k === k && !hasil) hasil = x;
+        });
+      });
+    }
+
+    return hasil || { k: k, i: '•', t: k };
+  },
+
+  html: function () {
+    var P = App.pages.menu;
+    var bos = App.state.session.role === 'SUPERADMIN';
+
+    return '' +
+      '<div class="card">' +
+        '<div class="inline chips" id="mn-tab">' +
+          '<button class="btn sm' + (P.tab === 'saya' ? '' : ' ghost') +
+            '" data-t="saya">Menu saya</button>' +
+          (bos
+            ? '<button class="btn sm' + (P.tab === 'role' ? '' : ' ghost') +
+              '" data-t="role">Per divisi</button>' : '') +
+        '</div>' +
+        '<p class="hint mt8 mb0" id="mn-ket"></p>' +
+        (bos ? '<div class="mt16" id="mn-pilihrole"></div>' : '') +
+      '</div>' +
+      '<div class="mt16" id="mn-isi"></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.menu;
+
+    document.getElementById('mn-tab').onclick = function (e) {
+      var b = e.target.closest('button[data-t]'); if (!b) return;
+      P.tab = b.dataset.t;
+      App.go('menu');
+    };
+
+    if (App.state.session.role === 'SUPERADMIN') {
+      var wadah = document.getElementById('mn-pilihrole');
+      if (wadah) {
+        wadah.style.display = P.tab === 'role' ? '' : 'none';
+        wadah.innerHTML =
+          '<div class="field mb0"><label>Divisi yang diatur</label>' +
+            '<select id="mn-role">' +
+              ['SALES', 'SALES_ONLINE', 'GUDANG', 'EKSEKUSI', 'ADMIN',
+               'KASIR', 'TEKNISI'].map(function (r) {
+                return '<option value="' + r + '"' +
+                  (P.peran === r ? ' selected' : '') + '>' +
+                  Fmt.esc(Fmt.roleLabel(r)) + '</option>';
+              }).join('') +
+            '</select></div>';
+
+        document.getElementById('mn-role').onchange = function () {
+          P.peran = this.value;
+          P.muatRole();
+        };
+      }
+    }
+
+    document.getElementById('mn-ket').textContent = P.tab === 'saya'
+      ? 'Susun urutan menu Anda sendiri. Tersimpan di akun, jadi ikut ke ' +
+        'komputer mana pun Anda masuk.'
+      : 'Tentukan menu apa saja yang dilihat sebuah divisi. Yang dimatikan ' +
+        'tidak bisa dimunculkan sendiri oleh pemakainya.';
+
+    if (P.tab === 'saya') P.muatSaya();
+    else {
+      P.peran = P.peran || 'SALES';
+      P.muatRole();
+    }
+  },
+
+  /* ---------- menu milik sendiri ---------- */
+  muatSaya: function () {
+    var P = App.pages.menu;
+    var isi = document.getElementById('mn-isi');
+
+    isi.innerHTML = (typeof memuatHtml === 'function')
+      ? memuatHtml() : '<div class="empty">Memuat…</div>';
+
+    api('apiMenuSaya', {}).then(function (d) {
+      /*
+       * Yang bisa disusun hanya menu yang memang diizinkan.
+       *
+       * Urutan simpanan dipakai lebih dulu, sisanya menyusul di
+       * bawah — jadi menu yang baru ditambahkan tidak hilang hanya
+       * karena belum ada di urutan lama.
+       */
+      var izin = d.izin || P.semuaKunci(d.peran);
+      var urut = (d.urut || []).filter(function (k) { return izin.indexOf(k) >= 0; });
+
+      izin.forEach(function (k) { if (urut.indexOf(k) < 0) urut.push(k); });
+
+      P.daftar = urut;
+      P.mati = [];
+      P.gambar(false);
+    }).catch(function (e) {
+      isi.innerHTML = '<div class="empty"><b>Gagal memuat</b>' +
+        Fmt.esc(e.message) + '</div>';
+    });
+  },
+
+  semuaKunci: function (peran) {
+    var r = peran || App.state.session.role;
+    var out = [];
+
+    (NAV[r] || []).forEach(function (x) {
+      if (x.grup) (x.items || []).forEach(function (y) { out.push(y.k); });
+      else out.push(x.k);
+    });
+
+    /*
+     * Menu yang disisipkan di luar daftar peran ikut bisa diatur.
+     *
+     * Omzet Saya tidak berdiri di daftar menu perannya — dia
+     * ditambahkan saat layar digambar. Tanpa disebut di sini, menu
+     * itu tidak pernah muncul di layar pengaturan, dan posisinya
+     * tidak bisa diubah siapa pun.
+     */
+    if (['SALES', 'SALES_ONLINE', 'SUPERADMIN'].indexOf(r) >= 0 &&
+        out.indexOf('omset') < 0) {
+      out.splice(1, 0, 'omset');
+    }
+
+    return out;
+  },
+
+  /* ---------- menu sebuah divisi ---------- */
+  muatRole: function () {
+    var P = App.pages.menu;
+    var isi = document.getElementById('mn-isi');
+
+    isi.innerHTML = (typeof memuatHtml === 'function')
+      ? memuatHtml() : '<div class="empty">Memuat…</div>';
+
+    api('apiMenuRole', { peran: P.peran }).then(function (d) {
+      var semua = P.semuaKunci(P.peran);
+
+      P.daftar = (d.aktif || []).filter(function (k) { return semua.indexOf(k) >= 0; });
+      P.mati = semua.filter(function (k) { return P.daftar.indexOf(k) < 0; });
+      P.gambar(true, d.diatur);
+    }).catch(function (e) {
+      isi.innerHTML = '<div class="empty"><b>Gagal memuat</b>' +
+        Fmt.esc(e.message) + '</div>';
+    });
+  },
+
+  gambar: function (modeRole, sudahDiatur) {
+    var P = App.pages.menu;
+    var peran = modeRole ? P.peran : App.state.session.role;
+
+    var baris = function (k, n, aktif) {
+      var m = P.namaMenu(k, peran);
+      var kunci = (k === 'home');
+
+      return '<div class="between" style="padding:10px 12px;border-bottom:' +
+          '1px solid var(--line-2)' + (aktif ? '' : ';opacity:.5') + '">' +
+        '<div class="inline" style="min-width:0">' +
+          '<span style="width:22px;text-align:center">' + m.i + '</span>' +
+          '<b style="font-size:14px">' + Fmt.esc(m.t) + '</b>' +
+          (kunci ? '<span class="badge">tetap</span>' : '') +
+        '</div>' +
+        '<div class="inline" style="flex-wrap:nowrap">' +
+          (aktif
+            ? '<button class="btn sm ghost mn-naik" data-k="' + k + '"' +
+                (n === 0 ? ' disabled' : '') + '>↑</button>' +
+              '<button class="btn sm ghost mn-turun" data-k="' + k + '"' +
+                (n === P.daftar.length - 1 ? ' disabled' : '') + '>↓</button>'
+            : '') +
+          (modeRole && !kunci
+            ? '<button class="btn sm ' + (aktif ? 'ghost' : '') + ' mn-alih" data-k="' + k +
+              '" style="' + (aktif ? 'color:var(--danger)' : '') + '">' +
+              (aktif ? 'Sembunyikan' : 'Tampilkan') + '</button>'
+            : '') +
+        '</div>' +
+      '</div>';
+    };
+
+    document.getElementById('mn-isi').innerHTML =
+      '<div class="card">' +
+        '<b>' + (modeRole ? 'Menu ' + Fmt.esc(Fmt.roleLabel(peran)) : 'Urutan menu Anda') + '</b>' +
+        '<div class="mt16">' +
+          P.daftar.map(function (k, n) { return baris(k, n, true); }).join('') +
+        '</div>' +
+
+        (P.mati.length
+          ? '<div class="sep"></div><b class="small muted">Disembunyikan</b>' +
+            '<div class="mt8">' +
+              P.mati.map(function (k) { return baris(k, -1, false); }).join('') +
+            '</div>'
+          : '') +
+
+        '<div class="inline mt16">' +
+          '<button class="btn" id="mn-simpan">Simpan</button>' +
+          (modeRole && sudahDiatur
+            ? '<button class="btn ghost" id="mn-reset">Kembalikan ke bawaan</button>' : '') +
+        '</div>' +
+        '<div class="note">Perubahan terlihat setelah halaman dimuat ulang.</div>' +
+      '</div>';
+
+    document.querySelectorAll('.mn-naik').forEach(function (b) {
+      b.onclick = function () { P.geser(b.dataset.k, -1, modeRole); };
+    });
+    document.querySelectorAll('.mn-turun').forEach(function (b) {
+      b.onclick = function () { P.geser(b.dataset.k, 1, modeRole); };
+    });
+    document.querySelectorAll('.mn-alih').forEach(function (b) {
+      b.onclick = function () { P.alih(b.dataset.k, modeRole); };
+    });
+
+    document.getElementById('mn-simpan').onclick = function () {
+      P.simpan(modeRole, this);
+    };
+
+    var br = document.getElementById('mn-reset');
+    if (br) br.onclick = function () {
+      Modal.confirm('Kembalikan ke bawaan?',
+        'Pengaturan menu divisi ini dihapus, dan menunya kembali seperti semula.',
+        'Ya, kembalikan', function () {
+          api('apiMenuReset', { peran: P.peran, idem: uid() }).then(function () {
+            toast('Menu dikembalikan ke bawaan.', 'ok');
+            P.muatRole();
+          }).catch(function (e) { toast(e.message, 'err'); });
+        });
+    };
+  },
+
+  geser: function (k, arah, modeRole) {
+    var P = App.pages.menu;
+    var i = P.daftar.indexOf(k);
+    var j = i + arah;
+    if (i < 0 || j < 0 || j >= P.daftar.length) return;
+
+    P.daftar[i] = P.daftar[j];
+    P.daftar[j] = k;
+    P.gambar(modeRole, true);
+  },
+
+  alih: function (k, modeRole) {
+    var P = App.pages.menu;
+    var i = P.daftar.indexOf(k);
+
+    if (i >= 0) { P.daftar.splice(i, 1); P.mati.push(k); }
+    else {
+      var j = P.mati.indexOf(k);
+      if (j >= 0) P.mati.splice(j, 1);
+      P.daftar.push(k);
+    }
+
+    P.gambar(modeRole, true);
+  },
+
+  simpan: function (modeRole, tombol) {
+    var P = App.pages.menu;
+    btnBusy(tombol, true, 'Menyimpan');
+
+    var fn = modeRole ? 'apiMenuSimpanRole' : 'apiMenuSimpanSaya';
+    var muatan = modeRole
+      ? { peran: P.peran, keys: P.daftar, idem: uid() }
+      : { keys: P.daftar, idem: uid() };
+
+    api(fn, muatan).then(function () {
+      btnBusy(tombol, false, 'Simpan');
+      toast(modeRole
+        ? 'Menu ' + Fmt.roleLabel(P.peran) + ' disimpan.'
+        : 'Urutan menu Anda disimpan.', 'ok', '✓ Tersimpan');
+
+      // Menu sendiri langsung dipasang ulang tanpa menunggu
+      if (!modeRole) {
+        App.menuUrut = P.daftar.slice();
+        App.renderShell();
+        App.go('menu');
+      }
+    }).catch(function (e) {
+      btnBusy(tombol, false, 'Simpan');
+      toast(e.message + (e.code ? '  [' + e.code + ']' : ''), 'err');
+    });
+  }
+};
+</script>

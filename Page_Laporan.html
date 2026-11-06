@@ -1,0 +1,435 @@
+<script>
+/* ============================================================
+   Halaman Laporan
+
+   Seluruh bagian dihitung server dalam satu kali baca, lalu dikirim
+   sekaligus. Berpindah tab tidak memanggil server lagi.
+   ============================================================ */
+App.pages.laporan = {
+  title: 'Laporan',
+  d: null,
+  tab: 'ringkas',
+  hari: 30,
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<div class="between">' +
+          '<div class="inline" id="lp-hari">' +
+            '<button class="btn sm ghost" data-h="1">Hari ini</button>' +
+            '<button class="btn sm ghost" data-h="7">7 hari</button>' +
+            '<button class="btn sm" data-h="30">30 hari</button>' +
+            '<button class="btn sm ghost" data-h="90">90 hari</button>' +
+          '</div>' +
+          '<div class="inline">' +
+            '<input type="date" id="lp-dari" style="width:auto">' +
+            '<span class="small muted">sampai</span>' +
+            '<input type="date" id="lp-sampai" style="width:auto">' +
+            '<button class="btn sm" id="lp-cari">Tampilkan</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div id="lp-isi" class="mt16"><div class="empty">Menghitung…</div></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.laporan;
+
+    document.getElementById('lp-hari').onclick = function (e) {
+      var b = e.target.closest('button[data-h]'); if (!b) return;
+      P.hari = Number(b.dataset.h);
+      document.querySelectorAll('#lp-hari button').forEach(function (x) {
+        x.classList.toggle('ghost', x.dataset.h !== b.dataset.h);
+      });
+      document.getElementById('lp-dari').value = '';
+      document.getElementById('lp-sampai').value = '';
+      P.load();
+    };
+
+    document.getElementById('lp-cari').onclick = function () { P.load(true); };
+    P.load();
+  },
+
+  load: function (pakaiTanggal) {
+    var P = App.pages.laporan;
+    var q = {};
+
+    if (pakaiTanggal) {
+      var a = document.getElementById('lp-dari').value;
+      var b = document.getElementById('lp-sampai').value;
+      if (!a || !b) return toast('Isi kedua tanggalnya dulu.', 'err');
+      q = { dari: a, sampai: b };
+      document.querySelectorAll('#lp-hari button').forEach(function (x) { x.classList.add('ghost'); });
+    } else {
+      q = { hari: P.hari };
+    }
+
+    document.getElementById('lp-isi').innerHTML =
+      '<div class="empty"><span class="spin" style="border-color:#ccc;border-top-color:#666"></span>' +
+      ' Menghitung…</div>';
+
+    api('apiLaporan', q).then(function (d) {
+      P.d = d;
+      P.draw();
+    }).catch(function (e) {
+      document.getElementById('lp-isi').innerHTML =
+        '<div class="empty"><b>Laporan tidak bisa dibuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  },
+
+  draw: function () {
+    var P = App.pages.laporan;
+    var d = P.d, r = d.ringkas;
+
+    var tabs = [
+      ['ringkas', 'Ringkasan'], ['sales', 'Per Sales'],
+      ['waktu', 'Kecepatan Proses'], ['barang', 'Barang'],
+      ['piutang', 'Piutang · ' + d.piutangJumlah]
+    ];
+
+    document.getElementById('lp-isi').innerHTML =
+      '<div class="grid c4">' +
+        '<div class="stat"><b>' + Fmt.rp(r.omzet) + '</b>' +
+          '<span>Omzet · ' + r.jumlah + ' transaksi</span></div>' +
+        '<div class="stat"><b style="color:var(--ok)">' + Fmt.rp(r.terbayar) + '</b>' +
+          '<span>Uang masuk</span></div>' +
+        '<div class="stat"><b style="color:' + (r.piutang ? 'var(--danger)' : 'var(--muted)') + '">' +
+          Fmt.rp(r.piutang) + '</b><span>Piutang berjalan</span></div>' +
+        '<div class="stat"><b>' + Fmt.rp(r.rataTrx) + '</b>' +
+          '<span>Rata-rata per transaksi</span></div>' +
+      '</div>' +
+
+      '<div class="card mt16"><div class="between">' +
+        '<div class="inline" id="lp-tab">' +
+          tabs.map(function (t) {
+            return '<button class="btn sm ' + (t[0] === P.tab ? '' : 'ghost') +
+                   '" data-t="' + t[0] + '">' + Fmt.esc(t[1]) + '</button>';
+          }).join('') +
+        '</div>' +
+        '<span class="small muted">' + Fmt.esc(d.rentang.dari) + ' s/d ' +
+          Fmt.esc(d.rentang.sampai) + '</span>' +
+      '</div></div>' +
+
+      '<div id="lp-tabisi" class="mt16"></div>';
+
+    document.getElementById('lp-tab').onclick = function (e) {
+      var b = e.target.closest('button[data-t]'); if (!b) return;
+      P.tab = b.dataset.t;
+      document.querySelectorAll('#lp-tab button').forEach(function (x) {
+        x.classList.toggle('ghost', x.dataset.t !== P.tab);
+      });
+      P.drawTab();
+    };
+
+    P.drawTab();
+  },
+
+  /** Batang sederhana, tanpa pustaka grafik tambahan */
+  batang: function (nilai, maks, warna) {
+    var pct = maks > 0 ? Math.round((nilai / maks) * 100) : 0;
+    return '<div style="height:6px;background:var(--line);border-radius:99px;overflow:hidden;margin-top:5px">' +
+      '<div style="height:100%;width:' + pct + '%;background:' + (warna || 'var(--brand)') + '"></div></div>';
+  },
+
+  drawTab: function () {
+    var P = App.pages.laporan;
+    var d = P.d;
+    var box = document.getElementById('lp-tabisi');
+
+    if (P.tab === 'ringkas') {
+      var maksHari = Math.max.apply(null, d.perTanggal.map(function (x) { return x.omzet; }).concat([1]));
+      box.innerHTML =
+        '<div class="grid c2">' +
+          '<div class="card">' +
+            '<h3>Status transaksi</h3>' +
+            (d.perStatus.length
+              ? d.perStatus.map(function (s) {
+                  return '<div class="between" style="padding:6px 0">' +
+                    '<span>' + Fmt.stageBadge(s.kode, s.label) + '</span>' +
+                    '<b>' + s.jumlah + '</b></div>';
+                }).join('')
+              : '<p class="hint mb0">Belum ada data.</p>') +
+          '</div>' +
+          '<div class="card">' +
+            '<h3>Uang masuk per metode</h3>' +
+            (d.pembayaran.perMetode.length
+              ? d.pembayaran.perMetode.map(function (m) {
+                  return '<div class="between" style="padding:6px 0">' +
+                    '<span>' + Fmt.esc(m.metode) + '</span>' +
+                    '<b class="mono">' + Fmt.rp(m.nilai) + '</b></div>';
+                }).join('') +
+                '<div class="sep"></div><div class="between"><b>Total</b>' +
+                '<b class="mono">' + Fmt.rp(d.pembayaran.total) + '</b></div>'
+              : '<p class="hint mb0">Belum ada pembayaran.</p>') +
+          '</div>' +
+        '</div>' +
+
+        '<div class="card mt16">' +
+          '<h3>Penjualan per jalur</h3>' +
+          (d.perJalur.length
+            ? d.perJalur.map(function (j) {
+                var maks = d.perJalur[0].omzet || 1;
+                return '<div style="padding:8px 0">' +
+                  '<div class="between"><b>' + Fmt.esc(j.jalur) + '</b>' +
+                  '<span><b class="mono">' + Fmt.rp(j.omzet) + '</b> ' +
+                  '<span class="small muted">· ' + j.jumlah + ' transaksi</span></span></div>' +
+                  P.batang(j.omzet, maks) + '</div>';
+              }).join('')
+            : '<p class="hint mb0">Belum ada data.</p>') +
+        '</div>' +
+
+        '<div class="card mt16">' +
+          '<h3>Harian</h3>' +
+          (d.perTanggal.length
+            ? '<div class="table-wrap mt16"><table><thead><tr>' +
+              '<th>Tanggal</th><th>Transaksi</th><th class="num">Omzet</th><th style="width:35%"></th>' +
+              '</tr></thead><tbody>' +
+              d.perTanggal.slice().reverse().map(function (h) {
+                return '<tr><td>' + Fmt.esc(h.tanggal) + '</td>' +
+                  '<td>' + h.jumlah + '</td>' +
+                  '<td class="num mono">' + Fmt.rp(h.omzet) + '</td>' +
+                  '<td>' + P.batang(h.omzet, maksHari) + '</td></tr>';
+              }).join('') + '</tbody></table></div>'
+            : '<p class="hint mb0">Belum ada data.</p>') +
+        '</div>';
+      return;
+    }
+
+    if (P.tab === 'sales') {
+      var maksS = d.perSales.length ? d.perSales[0].omzet : 1;
+      box.innerHTML = d.perSales.length
+        ? '<div class="table-wrap"><table><thead><tr>' +
+          '<th>Sales</th><th>Jalur</th><th>Transaksi</th>' +
+          '<th class="num">Omzet</th><th class="num">Diskon</th><th style="width:22%"></th>' +
+          '</tr></thead><tbody>' +
+          d.perSales.map(function (s) {
+            return '<tr>' +
+              '<td><b>' + Fmt.esc(s.nama) + '</b>' +
+                '<div class="small muted mono">' + Fmt.esc(s.kode) + '</div></td>' +
+              '<td><span class="badge brand">' + Fmt.esc(s.jalur) + '</span></td>' +
+              '<td>' + s.jumlah + '<div class="small muted">' + s.item + ' item</div></td>' +
+              '<td class="num mono">' + Fmt.rp(s.omzet) + '</td>' +
+              '<td class="num mono"' + (s.diskon ? ' style="color:var(--warn)"' : '') + '>' +
+                (s.diskon ? '−' + Fmt.rp(s.diskon) : '—') + '</td>' +
+              '<td>' + P.batang(s.omzet, maksS) + '</td></tr>';
+          }).join('') + '</tbody></table></div>' +
+          '<div class="small muted mt8">Diskon dihitung dari selisih harga master dengan harga jual.</div>'
+        : '<div class="empty"><b>Belum ada penjualan</b>Pada rentang waktu ini.</div>';
+      return;
+    }
+
+    if (P.tab === 'waktu') {
+      box.innerHTML =
+        '<div class="card">' +
+          '<h3>Berapa lama tiap tahap</h3>' +
+          '<p class="hint">Dihitung dari transaksi yang benar-benar melewati tahapnya. ' +
+            'Nilai tengah lebih jujur daripada rata-rata, karena satu transaksi yang ' +
+            'tertinggal semalaman bisa menarik rata-rata jauh ke atas.</p>' +
+          '<div class="table-wrap mt16"><table><thead><tr>' +
+            '<th>Tahap</th><th>Transaksi</th><th class="num">Nilai tengah</th>' +
+            '<th class="num">Rata-rata</th><th class="num">Terlama</th>' +
+          '</tr></thead><tbody>' +
+          d.waktu.map(function (w) {
+            var f = function (m) {
+              if (m === null) return '<span class="muted">—</span>';
+              if (m < 60) return m + ' menit';
+              if (m < 1440) return Math.round(m / 6) / 10 + ' jam';
+              return Math.round(m / 144) / 10 + ' hari';
+            };
+            return '<tr><td><b>' + Fmt.esc(w.nama) + '</b></td>' +
+              '<td>' + w.jumlah + '</td>' +
+              '<td class="num"><b>' + f(w.tengah) + '</b></td>' +
+              '<td class="num">' + f(w.rata) + '</td>' +
+              '<td class="num"' + (w.terlama > 1440 ? ' style="color:var(--danger)"' : '') + '>' +
+                f(w.terlama) + '</td></tr>';
+          }).join('') + '</tbody></table></div>' +
+          '<div class="small muted mt8">Kalau ada satu tahap yang nilai tengahnya jauh lebih besar ' +
+            'dari yang lain, di situlah alurnya sebenarnya melambat.</div>' +
+        '</div>';
+      return;
+    }
+
+    if (P.tab === 'barang') {
+      var maksB = d.barang.length ? d.barang[0].qty : 1;
+      box.innerHTML = d.barang.length
+        ? '<div class="table-wrap"><table><thead><tr>' +
+          '<th>Barang</th><th class="num">Terjual</th><th class="num">Nilai</th>' +
+          '<th>Transaksi</th><th style="width:22%"></th>' +
+          '</tr></thead><tbody>' +
+          d.barang.map(function (b) {
+            return '<tr>' +
+              '<td><b>' + Fmt.esc(b.nama) + '</b>' +
+                '<div class="small muted mono">' + Fmt.esc(b.kode) + '</div></td>' +
+              '<td class="num"><b>' + Fmt.angka(b.qty) + '</b></td>' +
+              '<td class="num mono">' + Fmt.rp(b.nilai) + '</td>' +
+              '<td>' + b.trx + 'x</td>' +
+              '<td>' + P.batang(b.qty, maksB) + '</td></tr>';
+          }).join('') + '</tbody></table></div>' +
+          '<div class="small muted mt8">Ditampilkan 30 barang teratas berdasarkan jumlah unit terjual.</div>'
+        : '<div class="empty"><b>Belum ada barang terjual</b>Pada rentang waktu ini.</div>';
+      return;
+    }
+
+    if (P.tab === 'piutang') {
+      box.innerHTML =
+        '<div class="card">' +
+          '<div class="between">' +
+            '<div><h3 class="mb0">' + d.piutangJumlah + ' transaksi belum lunas</h3>' +
+            '<p class="hint mb0">Sudah bernomor nota tapi uangnya belum penuh.</p></div>' +
+            '<b class="mono" style="font-size:22px;color:var(--danger)">' +
+              Fmt.rp(d.piutangTotal) + '</b>' +
+          '</div>' +
+        '</div>' +
+        (d.piutang.length
+          ? '<div class="table-wrap mt16"><table><thead><tr>' +
+            '<th>Transaksi</th><th>Customer</th><th>Sales</th>' +
+            '<th class="num">Total</th><th class="num">Sudah bayar</th>' +
+            '<th class="num">Sisa</th><th>Umur</th>' +
+            '</tr></thead><tbody>' +
+            d.piutang.map(function (p) {
+              return '<tr class="row-mark ' + (p.umur_hari > 14 ? 'off' : 'hold') +
+                '" data-id="' + Fmt.esc(p.trx_id) + '" style="cursor:pointer">' +
+                '<td><b class="mono">' + Fmt.esc(p.trx_no) + '</b>' +
+                  '<div class="small muted">' + Fmt.esc(p.nota_no) + '</div></td>' +
+                '<td>' + Fmt.esc(p.cust_name) +
+                  '<div class="small muted">' + Fmt.esc(p.cust_phone) + '</div></td>' +
+                '<td class="small">' + Fmt.esc(p.sales_name || '—') + '</td>' +
+                '<td class="num mono">' + Fmt.rp(p.grand_total) + '</td>' +
+                '<td class="num mono">' + Fmt.rp(p.paid_total) + '</td>' +
+                '<td class="num mono"><b style="color:var(--danger)">' +
+                  Fmt.rp(p.outstanding) + '</b></td>' +
+                '<td>' + (p.umur_hari > 14
+                  ? '<span class="badge danger">' + p.umur_hari + ' hari</span>'
+                  : '<span class="badge">' + p.umur_hari + ' hari</span>') + '</td></tr>';
+            }).join('') + '</tbody></table></div>' +
+            '<div class="small muted mt8">Klik barisnya untuk membuka transaksi. ' +
+              'Yang lewat 14 hari ditandai merah.</div>'
+          : '<div class="empty mt16"><b>Tidak ada piutang</b>Semua transaksi bernomor nota sudah lunas.</div>');
+
+      var tabel = box.querySelector('tbody');
+      if (tabel) tabel.onclick = function (e) {
+        var tr = e.target.closest('tr[data-id]'); if (!tr) return;
+        if (App.pages.monitor) App.go('monitor', tr.dataset.id);
+        else if (App.pages.pay) App.go('pay', tr.dataset.id);
+      };
+    }
+  }
+};
+
+/* ============================================================
+   HALAMAN PENGATURAN
+   ============================================================ */
+App.pages.setting = {
+  title: 'Pengaturan',
+  data: [],
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<h3>Pengaturan sistem</h3>' +
+        '<p class="hint">Semua yang bisa diubah tanpa menyentuh kode ada di sini. ' +
+          'Perubahan langsung berlaku dan tercatat di audit log.</p>' +
+        '<input type="text" id="st-q" placeholder="Cari pengaturan…" autocomplete="off">' +
+      '</div>' +
+      '<div class="mt16" id="st-list"><div class="empty"><b>Memuat<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.setting;
+    document.getElementById('st-q').oninput = debounce(function () { P.draw(); }, 200);
+
+    api('apiListSettings', {}).then(function (rows) {
+      P.data = rows;
+      P.draw();
+    }).catch(function (e) {
+      document.getElementById('st-list').innerHTML =
+        '<div class="empty"><b>Tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  },
+
+  draw: function () {
+    var P = App.pages.setting;
+    var q = document.getElementById('st-q').value.trim().toLowerCase();
+
+    var rows = P.data.filter(function (s) {
+      if (!q) return true;
+      return (s.key + ' ' + s.description + ' ' + s.group).toLowerCase().indexOf(q) >= 0;
+    });
+
+    if (!rows.length) {
+      document.getElementById('st-list').innerHTML =
+        '<div class="empty"><b>Tidak ditemukan</b>Coba kata kunci lain.</div>';
+      return;
+    }
+
+    var grup = {}, urutan = [];
+    rows.forEach(function (s) {
+      if (!grup[s.group]) { grup[s.group] = []; urutan.push(s.group); }
+      grup[s.group].push(s);
+    });
+
+    document.getElementById('st-list').innerHTML = urutan.map(function (g) {
+      return '<div class="card mt16">' +
+        '<h3>' + Fmt.esc(g) + '</h3>' +
+        grup[g].map(function (s) {
+          return '<div style="padding:12px 0;border-top:1px solid var(--line)">' +
+            '<div class="between" style="align-items:flex-start">' +
+              '<div style="flex:1;min-width:200px;padding-right:14px">' +
+                '<b class="mono small">' + Fmt.esc(s.key) + '</b>' +
+                '<div class="small muted">' + Fmt.esc(s.description) + '</div>' +
+                (s.updated_by ? '<div class="small muted">Diubah ' +
+                  Fmt.esc(Fmt.jam(s.updated_at)) + ' oleh ' + Fmt.esc(s.updated_by) + '</div>' : '') +
+              '</div>' +
+              '<div class="inline" style="min-width:280px">' +
+                /*
+                 * Isian panjang memakai kotak bertingkat.
+                 *
+                 * Beberapa pengaturan berisi daftar pilihan yang
+                 * dipisah koma — asal pesanan, cara serah, jenis
+                 * pekerjaan. Dalam kotak satu baris, ujungnya tidak
+                 * terlihat dan menambah satu nama saja jadi
+                 * menyulitkan.
+                 */
+                (String(s.value).length > 40
+                  ? '<textarea class="st-val mono" rows="2" data-key="' +
+                    Fmt.esc(s.key) + '" style="flex:1;min-width:0">' +
+                    Fmt.esc(s.value) + '</textarea>'
+                  : '<input type="text" class="st-val mono" data-key="' +
+                    Fmt.esc(s.key) + '" value="' + Fmt.esc(s.value) +
+                    '" style="flex:1;min-width:0">') +
+                '<button class="btn sm st-save" data-key="' + Fmt.esc(s.key) + '">Simpan</button>' +
+              '</div>' +
+            '</div></div>';
+        }).join('') +
+      '</div>';
+    }).join('');
+
+    document.querySelectorAll('.st-save').forEach(function (b) {
+      b.onclick = function () {
+        var el = document.querySelector('.st-val[data-key="' + b.dataset.key + '"]');
+        btnBusy(b, true);
+        api('apiSaveSetting', { key: b.dataset.key, value: el.value })
+          .then(function (r) {
+            btnBusy(b, false, 'Simpan');
+            if (!r.changed) return toast('Tidak ada perubahan.', '');
+            toast(b.dataset.key + ' diperbarui.', 'ok');
+            App.pages.setting.data.forEach(function (s) {
+              if (s.key === r.key) s.value = r.value;
+            });
+          }).catch(function (e) {
+            btnBusy(b, false, 'Simpan');
+            toast(e.message, 'err');
+          });
+      };
+    });
+
+    document.querySelectorAll('.st-val').forEach(function (el) {
+      el.onkeydown = function (e) {
+        if (e.key === 'Enter') {
+          document.querySelector('.st-save[data-key="' + el.dataset.key + '"]').click();
+        }
+      };
+    });
+  }
+};
+</script>

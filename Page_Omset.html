@@ -1,0 +1,135 @@
+<script>
+/* ============================================================
+   OMZET SAYA
+
+   Untuk akun sales perorangan. Yang dihitung pesanan yang memakai
+   kode salesnya — bukan yang kebetulan dia yang mengetik. Dua hal
+   itu berbeda: sales sering saling menggantikan saat yang satu
+   sedang melayani customer.
+
+   Daftar pesanan seluruh divisi tetap ada di Pesanan Saya. Layar
+   ini hanya menjawab satu pertanyaan: hari ini saya dapat berapa.
+   ============================================================ */
+App.pages.omset = {
+  title: 'Omzet Saya',
+  tanggal: '',
+  salesPilih: '',
+
+  html: function () {
+    var P = App.pages.omset;
+    if (!P.tanggal) P.tanggal = new Date().toISOString().substring(0, 10);
+
+    return '' +
+      '<div class="card">' +
+        '<div class="between">' +
+          '<div><h3 class="mb0">Omzet saya</h3>' +
+          '<p class="hint mb0">Dihitung dari nota yang terbit atas nama Anda.</p></div>' +
+          '<div class="inline" style="gap:8px">' +
+            '<input type="date" id="om-tgl" value="' + P.tanggal + '">' +
+            '<button class="btn sm" id="om-lihat">Lihat</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt16" id="om-isi"></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.omset;
+
+    document.getElementById('om-lihat').onclick = function () {
+      P.tanggal = document.getElementById('om-tgl').value ||
+                  new Date().toISOString().substring(0, 10);
+      P.load();
+    };
+
+    P.load();
+  },
+
+  load: function () {
+    var P = App.pages.omset;
+    var isi = document.getElementById('om-isi');
+    if (!isi) return;
+
+    isi.innerHTML = (typeof memuatHtml === 'function')
+      ? memuatHtml() : '<div class="empty">Memuat…</div>';
+
+    api('apiOmsetSaya', {
+      tanggal: P.tanggal, sales_code: P.salesPilih || ''
+    }).then(function (d) {
+      if (!d.ada) {
+        /*
+         * Akun yang belum ditautkan tetap bisa memakai layar ini —
+         * tinggal pilih nama salesnya.
+         *
+         * Akun divisi yang dipakai bersama memang tidak punya satu
+         * pemilik omzet, tapi orang yang memakainya tetap ingin
+         * tahu angkanya sendiri hari itu.
+         */
+        isi.innerHTML = '<div class="card"><b>Pilih nama sales</b>' +
+          '<p class="hint">Akun ini dipakai bersama, jadi pilih dulu nama yang ' +
+          'mau dilihat omzetnya. Kalau akun ini milik Anda sendiri, minta Super ' +
+          'Admin menautkannya di Kelola User supaya tidak perlu memilih lagi.</p>' +
+          '<div class="inline mt16">' +
+            '<select id="om-sales" style="flex:1;min-width:0"></select>' +
+            '<button class="btn" id="om-pilih">Lihat</button>' +
+          '</div></div>';
+
+        api('apiListSales', {}).then(function (sl) {
+          var sel = document.getElementById('om-sales');
+          if (!sel) return;
+          sel.innerHTML = '<option value="">— pilih nama —</option>' +
+            (sl.list || []).map(function (x) {
+              return '<option value="' + Fmt.esc(x.code) + '"' +
+                (P.salesPilih === x.code ? ' selected' : '') + '>' +
+                Fmt.esc(x.name) + ' · ' + Fmt.esc(x.code) + '</option>';
+            }).join('');
+        }).catch(function () {});
+
+        document.getElementById('om-pilih').onclick = function () {
+          var sel = document.getElementById('om-sales');
+          if (!sel || !sel.value) return toast('Pilih dulu namanya.', 'err');
+          P.salesPilih = sel.value;
+          P.load();
+        };
+        return;
+      }
+
+      isi.innerHTML =
+        '<div class="grid c3">' +
+          '<div class="stat"><b class="mono">' + Fmt.rp(d.nilai_nota) + '</b>' +
+            '<span>Sudah bernota · ' + d.bernota + ' nota</span></div>' +
+          '<div class="stat"><b class="mono" style="color:var(--warn)">' +
+            Fmt.rp(d.nilai_jalan) + '</b>' +
+            '<span>Masih berjalan · ' + d.berjalan + ' pesanan</span></div>' +
+          '<div class="stat"><b>' + Fmt.esc(d.sales_code) + '</b>' +
+            '<span>Kode sales Anda</span></div>' +
+        '</div>' +
+
+        (d.list.length
+          ? '<div class="table-wrap mt16"><table><thead><tr>' +
+              '<th>Transaksi</th><th>Customer</th>' +
+              '<th class="kol-opsional">Keadaan</th><th class="num">Nilai</th>' +
+            '</tr></thead><tbody>' +
+            d.list.map(function (t) {
+              return '<tr>' +
+                '<td><b class="mono small">' + Fmt.esc(t.trx_no) + '</b>' +
+                  (t.nota_no
+                    ? '<div class="small muted">' + Fmt.esc(t.nota_no) + '</div>'
+                    : '<div class="small" style="color:var(--warn)">belum bernota</div>') +
+                '</td>' +
+                '<td>' + Fmt.esc(t.cust_name) +
+                  '<div class="small muted">' + t.item_count + ' item</div></td>' +
+                '<td class="small kol-opsional">' + Fmt.esc(t.stage_label) + '</td>' +
+                '<td class="num mono">' + Fmt.rp(t.grand_total) + '</td>' +
+              '</tr>';
+            }).join('') + '</tbody></table></div>'
+          : '<div class="empty mt16"><b>Belum ada transaksi pada tanggal ini</b>' +
+            'Yang terhitung adalah pesanan yang memakai kode sales Anda.</div>');
+
+    }).catch(function (e) {
+      isi.innerHTML = '<div class="empty"><b>Gagal memuat</b>' +
+        Fmt.esc(e.message + (e.code ? '  [' + e.code + ']' : '')) + '</div>';
+    });
+  }
+};
+</script>

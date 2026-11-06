@@ -1,0 +1,176 @@
+<script>
+/* ============================================================
+   Halaman Data Customer
+   ============================================================ */
+App.pages.cust = {
+  title: 'Data Customer',
+  data: [],
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<div class="between">' +
+          '<div style="flex:1;min-width:220px">' +
+            '<h3>Cari customer</h3>' +
+            '<p class="hint mb0">Nama, nomor WhatsApp, atau kode member.</p>' +
+          '</div>' +
+          (App.can('CUSTOMER_CREATE') ? '<button class="btn" id="k-new">Customer baru</button>' : '') +
+        '</div>' +
+        '<input type="text" id="k-q" class="mt16" placeholder="Ketik minimal 2 huruf…" autocomplete="off">' +
+      '</div>' +
+      '<div class="mt16" id="k-list"><div class="empty">Memuat customer terbaru…</div></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.cust;
+    var nb = document.getElementById('k-new');
+    if (nb) nb.onclick = function () { P.form(null); };
+
+    document.getElementById('k-q').oninput = debounce(function (e) {
+      var v = e.target.value.trim();
+      if (v.length < 2) { P.loadRecent(); return; }
+      api('apiSearchCustomer', { q: v }).then(function (rows) {
+        P.data = rows; P.draw('Hasil pencarian');
+      }).catch(function (e2) { toast(e2.message, 'err'); });
+    }, 320);
+
+    P.loadRecent();
+  },
+
+  loadRecent: function () {
+    var P = App.pages.cust;
+    api('apiRecentCustomers', {}).then(function (rows) {
+      P.data = rows; P.draw('Customer terbaru');
+    }).catch(function (e) {
+      document.getElementById('k-list').innerHTML =
+        '<div class="empty"><b>Data tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  },
+
+  draw: function (judul) {
+    var P = App.pages.cust;
+    if (!P.data.length) {
+      document.getElementById('k-list').innerHTML =
+        '<div class="empty"><b>Tidak ada customer</b>Tambahkan lewat tombol Customer baru, ' +
+        'atau lewat form QR saat sudah dipasang.</div>';
+      return;
+    }
+
+    document.getElementById('k-list').innerHTML =
+      '<div class="card mb0" style="border-radius:14px 14px 0 0;border-bottom:0">' +
+        '<h3 class="mb0">' + Fmt.esc(judul) + ' · ' + P.data.length + '</h3></div>' +
+      '<div class="table-wrap" style="border-radius:0 0 14px 14px"><table><thead><tr>' +
+        /*
+         * Kolom Transaksi diganti Email.
+         *
+         * Jumlah transaksi jarang dipakai saat membuka daftar ini —
+         * yang dicari biasanya cara menghubungi orangnya. Email
+         * dipakai Admin untuk mengirim nota dan faktur, dan selama
+         * ini harus dibuka satu per satu lewat tombol Ubah.
+         */
+        '<th>Nama</th><th>WhatsApp</th><th class="kol-opsional">Email</th>' +
+        '<th>Member</th><th></th>' +
+      '</tr></thead><tbody>' +
+      P.data.map(function (c) {
+        return '<tr data-id="' + Fmt.esc(c.customer_id) + '">' +
+          '<td><b>' + Fmt.esc(c.full_name) + '</b>' +
+            /*
+             * Di HP email ditaruh di bawah nama, karena kolomnya
+             * sendiri disembunyikan supaya tabelnya tidak melebar.
+             */
+            (c.email ? '<div class="small muted hp-only">✉ ' +
+              Fmt.esc(c.email) + '</div>' : '') +
+            (c.address ? '<div class="small muted">' + Fmt.esc(c.address) + '</div>' : '') + '</td>' +
+          '<td class="mono">' + Fmt.esc(c.phone) + '</td>' +
+          '<td class="small kol-opsional">' +
+            (c.email ? Fmt.esc(c.email) : '<span class="muted">—</span>') + '</td>' +
+          '<td>' + (c.member_code ? '<span class="badge brand">' + Fmt.esc(c.member_code) + '</span>' : '<span class="muted small">—</span>') + '</td>' +
+          /*
+           * Tombol buat pesanan dibuang dari sini.
+           *
+           * Layar ini untuk mengurus data customer — mencari,
+           * membetulkan nomor, menambah email. Membuat pesanan
+           * dimulai dari menunya sendiri, dan customernya dipilih
+           * di sana.
+           *
+           * Dua jalan masuk untuk satu pekerjaan membuat orang ragu
+           * mana yang benar, dan tombol di sini mudah tertekan saat
+           * yang dimaksud sebenarnya Ubah.
+           */
+          '<td><div class="inline">' +
+            (App.can('CUSTOMER_EDIT')
+              ? '<button class="btn sm ghost" data-act="edit">Ubah</button>' : '') +
+          '</div></td></tr>';
+      }).join('') + '</tbody></table></div>';
+
+    document.getElementById('k-list').onclick = function (e) {
+      var b = e.target.closest('button[data-act]'); if (!b) return;
+      var id = b.closest('tr').dataset.id;
+      var c = P.data.filter(function (x) { return x.customer_id === id; })[0];
+      if (!c) return;
+      if (b.dataset.act === 'edit') P.form(c);
+      if (b.dataset.act === 'order') {
+        api('apiCreateDraft', { customer_id: c.customer_id, idem: uid() }).then(function (r) {
+          toast('Pesanan ' + r.trx_no + ' dibuat.', 'ok');
+          App.bukaDari('order', r.trx_id, 'cust');
+        }).catch(function (e2) { toast(e2.message, 'err'); });
+      }
+    };
+  },
+
+  form: function (c) {
+    var P = App.pages.cust;
+    var baru = !c;
+    Modal.open({
+      title: baru ? 'Customer baru' : 'Ubah ' + c.full_name,
+      sub: baru ? 'Kalau nomor WhatsApp-nya sudah terdaftar, data yang lama akan diperbarui.'
+                : 'Perubahan tercatat di riwayat.',
+      okText: baru ? 'Simpan customer' : 'Simpan perubahan',
+      body:
+        '<div class="field"><label>Nama</label><input type="text" id="x-name" value="' +
+          Fmt.esc(baru ? '' : c.full_name) + '"></div>' +
+        '<div class="field"><label>Nomor WhatsApp</label><input type="tel" id="x-phone" value="' +
+          Fmt.esc(baru ? '' : c.phone) + '" placeholder="081234567890"></div>' +
+        '<div class="field"><label>Email</label><input type="email" id="x-email" value="' +
+          Fmt.esc(baru ? '' : (c.email || '')) + '"></div>' +
+        '<div class="field"><label>Alamat</label><input type="text" id="x-addr" value="' +
+          Fmt.esc(baru ? '' : (c.address || '')) + '"></div>' +
+        '<div class="field mb0"><label>Kode member ELS</label><input type="text" id="x-member" value="' +
+          Fmt.esc(baru ? '' : (c.member_code || '')) + '"></div>',
+      onOk: function (close, btn) {
+        var data = {
+          full_name: document.getElementById('x-name').value,
+          phone: document.getElementById('x-phone').value,
+          email: document.getElementById('x-email').value,
+          address: document.getElementById('x-addr').value,
+          member_code: document.getElementById('x-member').value
+        };
+        /*
+         * Disimpan di latar belakang.
+         *
+         * Data customer sering diisi sambil orangnya menunggu di
+         * depan meja. Menahan layar beberapa detik di situ membuat
+         * dua orang menunggu untuk satu penyimpanan.
+         */
+        if (!baru) data.customer_id = c.customer_id;
+
+        close();
+        toast(baru ? 'Customer sedang disimpan…' : 'Perubahan sedang disimpan…', 'ok');
+
+        Latar.simpan(baru ? 'apiCreateCustomer' : 'apiUpdateCustomer',
+          { data: data, idem: uid() }, {
+            judul: baru ? 'Simpan customer ' + data.full_name
+                        : 'Ubah data ' + data.full_name,
+            keterangan: 'Buka lagi Data Customer dan isikan sekali lagi.',
+            berhasil: function (r) {
+              toast(baru
+                ? (r.merged ? 'Nomor sudah ada, data diperbarui.' : 'Customer tersimpan.')
+                : 'Perubahan disimpan.', 'ok', '✓ Tersimpan');
+              P.loadRecent();
+            }
+          }).catch(function () {});
+      }
+    });
+  }
+};
+</script>

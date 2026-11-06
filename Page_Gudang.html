@@ -1,0 +1,2161 @@
+<script>
+/* ============================================================
+   Halaman Gudang — v3
+
+   Perubahan penting dari v2:
+   - Mengetik SN tidak lagi menyimpan ke spreadsheet satu per satu.
+     Layar tidak pernah digambar ulang saat orang sedang mengetik,
+     jadi tidak ada lagi ketikan yang hilang.
+   - Seluruh SN dikirim sekali saat menekan Konfirmasi barang siap.
+   - SN yang sudah dipindai disimpan sementara di browser, jadi tidak
+     hilang kalau halaman tertutup sebelum sempat dikonfirmasi.
+   - Pengecekan pesanan baru dimatikan selama layar siapkan terbuka,
+     supaya proses memindai tidak terganggu.
+   ============================================================ */
+
+/* ---------- nada dan suara, tanpa file audio ---------- */
+var Bunyi = {
+  ctx: null,
+  aktif: false,
+
+  nyalakan: function () {
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return false;
+      Bunyi.ctx = Bunyi.ctx || new AC();
+      if (Bunyi.ctx.state === 'suspended') Bunyi.ctx.resume();
+      Bunyi.aktif = true;
+      Bunyi.nada(880, 0.08);
+      try {
+        if (window.speechSynthesis) {
+          var u = new SpeechSynthesisUtterance(' ');
+          u.volume = 0;
+          window.speechSynthesis.speak(u);
+        }
+      } catch (e) {}
+      return true;
+    } catch (e) { return false; }
+  },
+
+  nada: function (hz, lama) {
+    if (!Bunyi.ctx) return;
+    try {
+      var o = Bunyi.ctx.createOscillator();
+      var g = Bunyi.ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = hz || 880;
+      g.gain.setValueAtTime(0.0001, Bunyi.ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.3, Bunyi.ctx.currentTime + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, Bunyi.ctx.currentTime + (lama || 0.15));
+      o.connect(g); g.connect(Bunyi.ctx.destination);
+      o.start(); o.stop(Bunyi.ctx.currentTime + (lama || 0.15) + 0.02);
+    } catch (e) {}
+  },
+
+  /** Satu kali ting-tong */
+  tingTong: function () {
+    if (!Bunyi.aktif) return;
+    Bunyi.nada(1318, 0.24);
+    setTimeout(function () { Bunyi.nada(988, 0.38); }, 250);
+  },
+
+  /** Ting-tong dua kali, seperti bel toko */
+  tingTongDua: function () {
+    if (!Bunyi.aktif) return;
+    Bunyi.tingTong();
+    setTimeout(function () { Bunyi.tingTong(); }, 700);
+  },
+
+  bicara: function (kalimat, selesai) {
+    if (!Bunyi.aktif || !window.speechSynthesis || !kalimat) {
+      if (selesai) selesai();
+      return;
+    }
+    try {
+      var u = new SpeechSynthesisUtterance(kalimat);
+      if (window.SuaraID) SuaraID.pasang(u); else u.lang = 'id-ID';
+      u.rate = 0.95;
+      u.volume = 1;
+      if (selesai) {
+        u.onend = selesai;
+        u.onerror = selesai;
+      }
+      window.speechSynthesis.speak(u);
+    } catch (e) {
+      if (selesai) selesai();
+    }
+  },
+
+  /**
+   * Rangkaian lengkap: ting-tong dua kali, lalu kalimatnya dibacakan
+   * dua kali.
+   *
+   * Dulu nada dan suara dijalankan bersamaan lewat penghitung waktu,
+   * jadi sering saling tabrak dan kalimatnya terdengar terpotong.
+   * Sekarang giliran berikutnya baru mulai setelah yang sebelumnya
+   * benar-benar selesai.
+   */
+  sedangBunyi: false,
+
+  urutanAlarm: function (kalimat, ulangUcapan) {
+    if (!Bunyi.aktif) return;
+    if (Bunyi.sedangBunyi) return;      // jangan menimpa rangkaian yang sedang jalan
+    Bunyi.sedangBunyi = true;
+
+    try { window.speechSynthesis.cancel(); } catch (e) {}
+
+    Bunyi.tingTongDua();
+
+    var sisa = Math.max(Number(ulangUcapan) || 2, 1);
+    var ucap = function () {
+      if (sisa <= 0) { Bunyi.sedangBunyi = false; return; }
+      sisa--;
+      Bunyi.bicara(kalimat, function () {
+        if (sisa > 0) setTimeout(ucap, 500);
+        else Bunyi.sedangBunyi = false;
+      });
+    };
+
+    // Menunggu dua ting-tong selesai dulu, baru bicara
+    setTimeout(ucap, 1650);
+
+    // Pengaman: kalau suara gagal berjalan, penanda tidak boleh
+    // tersangkut selamanya
+    setTimeout(function () { Bunyi.sedangBunyi = false; }, 20000);
+  },
+
+  scanOk: function () { if (Bunyi.aktif) Bunyi.nada(1500, 0.06); },
+  salah: function () { if (Bunyi.aktif) Bunyi.nada(220, 0.28); }
+};
+
+/* Kalimat alarm untuk pesanan yang diubah. Bisa diganti lewat
+   SETTINGS ALARM_VOICE_REVISI, dibaca saat antrian dimuat. */
+var Settings_ALARM_REVISI = 'Ada pesanan diubah, mohon dicek ulang';
+
+/* ---------- pengatur alarm berulang ---------- */
+var Alarm = {
+  timer: null,
+  tundaSampai: 0,
+  jumlah: 0,
+  atur: { ulangDetik: 30, tundaMenit: 5, kalimat: 'Ada pesanan baru', pakaiSuara: true },
+
+  perbarui: function (jumlahBaru, atur, jumlahRevisi) {
+    Alarm.jumlah = jumlahBaru;
+    Alarm.revisi = jumlahRevisi || 0;
+    if (atur) Alarm.atur = atur;
+
+    var total = Alarm.jumlah + Alarm.revisi;
+    clearInterval(Alarm.timer);
+    Alarm.timer = null;
+    if (!total || !Alarm.atur.ulangDetik) { Alarm.gambarTombol(); return; }
+
+    Alarm.bunyikan();
+    Alarm.timer = setInterval(function () {
+      // Berbunyi di menu mana pun, bukan cuma saat halaman antrian terbuka
+      if (!App.state.session) { Alarm.stop(); return; }
+      Alarm.bunyikan();
+    }, Math.max(Number(Alarm.atur.ulangDetik), 10) * 1000);
+
+    Alarm.gambarTombol();
+  },
+
+  bunyikan: function () {
+    var total = (Alarm.jumlah || 0) + (Alarm.revisi || 0);
+    if (!total || !Bunyi.aktif) return;
+    if (Date.now() < Alarm.tundaSampai) return;
+
+    if (!Alarm.atur.pakaiSuara) {
+      Bunyi.tingTongDua();
+      return;
+    }
+
+    var kal;
+    if (Alarm.jumlah && Alarm.revisi) {
+      kal = 'Ada pesanan baru dan pesanan yang diubah';
+    } else if (Alarm.revisi) {
+      kal = Alarm.revisi > 1
+        ? 'Ada ' + Alarm.revisi + ' pesanan diubah, mohon dicek ulang'
+        : (Settings_ALARM_REVISI || 'Ada pesanan diubah, mohon dicek ulang');
+    } else {
+      kal = Alarm.atur.kalimat || 'Ada pesanan baru nih';
+      if (Alarm.jumlah > 1) kal = 'Ada ' + Alarm.jumlah + ' pesanan baru nih';
+    }
+
+    Bunyi.urutanAlarm(kal, Number(Alarm.atur.ulangUcapan) || 2);
+  },
+
+  tunda: function () {
+    var menit = Number(Alarm.atur.tundaMenit || 5);
+    Alarm.tundaSampai = Date.now() + menit * 60000;
+    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+    Alarm.gambarTombol();
+    toast('Alarm ditunda ' + menit + ' menit. Pesanan tetap di antrian.', 'ok');
+  },
+
+  stop: function () {
+    clearInterval(Alarm.timer);
+    Alarm.timer = null;
+    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+  },
+
+  gambarTombol: function () {
+    var el = document.getElementById('gd-alarm');
+    if (!el) return;
+    var total = (Alarm.jumlah || 0) + (Alarm.revisi || 0);
+    if (!total) { el.innerHTML = ''; return; }
+
+    var adaRevisi = Alarm.revisi > 0;
+    var ditunda = Date.now() < Alarm.tundaSampai;
+    var judul = ditunda ? '🔕 Alarm ditunda'
+      : (adaRevisi && Alarm.jumlah
+          ? '🔔 ' + Alarm.jumlah + ' pesanan baru · ✏️ ' + Alarm.revisi + ' pesanan diubah'
+          : (adaRevisi
+              ? '✏️ ' + Alarm.revisi + ' pesanan diubah, perlu dicek ulang'
+              : '🔔 ' + Alarm.jumlah + ' pesanan menunggu dibuka'));
+
+    el.innerHTML =
+      '<div class="card" style="background:' +
+        (ditunda ? 'var(--paper)' : (adaRevisi ? '#EDE7FD' : 'var(--brand-soft)')) +
+        ';border-color:' + (ditunda ? 'var(--line)' : (adaRevisi ? '#7c3aed' : 'var(--brand)')) +
+        ';margin-bottom:14px">' +
+        '<div class="between">' +
+          '<div>' +
+            '<b style="font-size:16px">' + judul + '</b>' +
+            '<div class="small muted">' +
+              (ditunda ? 'Akan berbunyi lagi setelah waktu tunda habis.'
+                       : 'Alarm berhenti sendiri setelah semua pesanan dibuka.') + '</div>' +
+          '</div>' +
+          (ditunda ? '' : '<button class="btn ghost" id="gd-snooze">Tunda ' +
+            (Alarm.atur.tundaMenit || 5) + ' menit</button>') +
+        '</div></div>';
+
+    var b = document.getElementById('gd-snooze');
+    if (b) b.onclick = function () { Alarm.tunda(); };
+  }
+};
+
+/* ============================================================
+   ANTRIAN PESANAN
+   ============================================================ */
+App.pages.queue = {
+  title: 'Antrian Pesanan',
+  s: { list: [], baru: 0, proses: 0, tertahan: 0, pulse: 0, filter: 'MENUNGGU_GUDANG' },
+  timer: null,
+  d: null,
+  lokal: null,
+
+  html: function (param) {
+    if (param) return '<div id="gd-root"><div class="empty">Membuka pesanan…</div></div>';
+    return '' +
+      '<div id="gd-alarm"></div>' +
+      '<div class="grid c4" id="gd-stat"></div>' +
+      '<div class="card mt16">' +
+        '<div class="between">' +
+          '<div class="inline" id="gd-filter">' +
+            /*
+             * Pesanan baru didahulukan dan terbuka sejak awal.
+             *
+             * Yang dibuka pertama kali adalah pekerjaan yang belum
+             * disentuh siapa pun. "Semua" berguna untuk menengok,
+             * bukan untuk memulai — jadi diletakkan paling akhir.
+             */
+            '<button class="btn sm" data-f="MENUNGGU_GUDANG">Pesanan baru</button>' +
+            (App.state.session.role === 'EKSEKUSI'
+              ? '<button class="btn sm ghost" data-f="DRAFT">Draft</button>' : '') +
+            '<button class="btn sm ghost" data-f="revisi">Diubah</button>' +
+            '<button class="btn sm ghost" data-f="PROSES_GUDANG">Sedang disiapkan</button>' +
+            '<button class="btn sm ghost" data-f="semua">Semua</button>' +
+          '</div>' +
+          '<div class="inline">' +
+            '<button class="btn sm ghost" id="gd-sound">🔊 Aktifkan suara</button>' +
+            '<button class="btn sm ghost" id="gd-refresh" title="Muat ulang">↻</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt16" id="gd-list"><div class="empty">Memuat antrian…</div></div>';
+  },
+
+  mount: function (view, param) {
+    var P = App.pages.queue;
+
+    // Layar siapkan barang: tidak ada pengecekan berkala sama sekali,
+    // supaya proses memindai SN tidak pernah terganggu.
+    P.muatPilihanKerja();
+    if (param) {
+      var baca = (P.bacaSaja === param);
+      P.bacaSaja = null;
+      P.bukaDetail(param, baca);
+      return;
+    }
+
+    document.getElementById('gd-filter').onclick = function (e) {
+      var b = e.target.closest('button[data-f]'); if (!b) return;
+      P.s.filter = b.dataset.f;
+      document.querySelectorAll('#gd-filter button').forEach(function (x) {
+        x.classList.toggle('ghost', x.dataset.f !== P.s.filter);
+      });
+      P.draw();
+    };
+    document.getElementById('gd-refresh').onclick = function () { P.load(true); };
+
+    var tombolSuara = document.getElementById('gd-sound');
+    tombolSuara.onclick = function () {
+      if (Bunyi.nyalakan()) {
+        this.textContent = '🔊 Suara aktif';
+        this.classList.remove('ghost');
+        toast('Suara notifikasi aktif untuk sesi ini.', 'ok');
+        Alarm.perbarui(P.s.baru, P.s.alarm);
+      } else {
+        toast('Browser ini tidak mendukung suara notifikasi.', 'err');
+      }
+    };
+    if (Bunyi.aktif) {
+      tombolSuara.textContent = '🔊 Suara aktif';
+      tombolSuara.classList.remove('ghost');
+    }
+
+    // Pengecekan pesanan baru dikerjakan pengawas aplikasi di bawah,
+    // supaya tetap jalan walau Gudang sedang membuka menu lain.
+    P.load(false);
+  },
+
+  load: function (manual, adaPerubahan) {
+    var P = App.pages.queue;
+    api('apiGudangQueue', {}).then(function (d) {
+      var baruSebelumnya = P.s.baru;
+      var revSebelumnya = P.s.revisi || 0;
+      P.s = {
+        list: d.list, baru: d.baru, proses: d.proses, revisi: d.revisi,
+        tertahan: d.tertahan, pulse: d.pulse, stuckMin: d.stuckMin,
+        alarm: d.alarm, filter: P.s.filter
+      };
+      P.draw();
+
+      if (adaPerubahan && d.revisi > revSebelumnya) {
+        Alarm.tundaSampai = 0;
+        toast('Ada pesanan yang diubah Sales. Cek ulang barangnya.', 'err', '✏️ Pesanan diubah');
+      }
+      if (adaPerubahan && d.baru > baruSebelumnya) {
+        Alarm.tundaSampai = 0;
+        toast(d.baru - baruSebelumnya > 1
+          ? (d.baru - baruSebelumnya) + ' pesanan baru masuk.'
+          : 'Pesanan baru masuk.', 'ok', '🔔 Pesanan baru');
+      }
+      Alarm.perbarui(d.baru, d.alarm, d.revisi);
+      if (manual) toast('Antrian diperbarui.', 'ok');
+    }).catch(function (e) {
+      document.getElementById('gd-list').innerHTML =
+        '<div class="empty"><b>Antrian tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  },
+
+  draw: function () {
+    var P = App.pages.queue;
+
+    document.getElementById('gd-stat').innerHTML =
+      '<div class="stat"><b style="color:var(--brand)">' + P.s.baru + '</b><span>Pesanan baru</span></div>' +
+      '<div class="stat"><b style="color:#7c3aed">' + (P.s.revisi || 0) +
+        '</b><span>Diubah, perlu dicek ulang</span></div>' +
+      '<div class="stat"><b style="color:var(--warn)">' + P.s.proses + '</b><span>Sedang disiapkan</span></div>' +
+      '<div class="stat"><b style="color:' + (P.s.tertahan ? 'var(--danger)' : 'var(--muted)') + '">' +
+        P.s.tertahan + '</b><span>Tertahan lebih dari ' + (P.s.stuckMin || 30) + ' menit</span></div>';
+
+    var rows = P.s.list.filter(function (t) {
+      if (P.s.filter === 'semua') return true;
+      if (P.s.filter === 'revisi') return !!t.revisi;
+
+      /*
+       * Pesanan indent ikut dihitung sebagai pesanan baru.
+       *
+       * Barangnya memang belum datang, tapi resepnya tetap harus
+       * dicetak dan penanggung jawabnya ditentukan sekarang. Kalau
+       * hanya muncul di "Semua", yang baru masuk tidak terlihat di
+       * layar yang paling sering dibuka.
+       */
+      if (P.s.filter === 'DRAFT') return t.stage_status === 'DRAFT';
+
+      if (P.s.filter === 'MENUNGGU_GUDANG') {
+        if (t.revisi) return false;
+        if (t.stage_status === 'DRAFT') return true;
+        if (t.stage_status === 'MENUNGGU_GUDANG') return true;
+
+        /*
+         * Pesanan indent berhenti muncul di sini begitu ditangani.
+         *
+         * Yang perlu dikerjakan Eksekusi saat pesanan indent masuk
+         * cuma dua: cetak resep dan tentukan penanggung jawabnya.
+         * Setelah itu tidak ada lagi yang bisa dikerjakan sampai
+         * barangnya datang — tempatnya pindah ke menu Menunggu
+         * Barang, supaya antrian ini hanya berisi pekerjaan yang
+         * benar-benar menunggu.
+         */
+        return t.stage_status === 'MENUNGGU_BARANG' && !t.ditangani;
+      }
+
+      return t.stage_status === P.s.filter && !t.revisi;
+    });
+
+    if (!rows.length) {
+      document.getElementById('gd-list').innerHTML =
+        '<div class="empty"><b>Tidak ada pesanan baru</b>' +
+        'Pesanan muncul di sini otomatis begitu Sales konfirmasi. ' +
+        'Yang sedang dikerjakan ada di tab sebelah.</div>';
+      return;
+    }
+
+    document.getElementById('gd-list').innerHTML = rows.map(function (t) {
+      var baru = t.stage_status === 'MENUNGGU_GUDANG';
+      var adaDraft = !!Store.get('els_sn_' + t.trx_id);
+      var rev = t.revisi;
+
+      var garis = rev ? '#7c3aed'
+                      : (t.tertahan ? 'var(--danger)' : (baru ? 'var(--brand)' : 'var(--warn)'));
+
+      return '<div class="card" style="margin-bottom:12px;border-left:5px solid ' + garis + '" ' +
+          'data-id="' + Fmt.esc(t.trx_id) + '">' +
+        '<div class="between">' +
+          '<div>' +
+            '<div class="inline" style="margin-bottom:4px">' +
+              (rev
+                ? '<span class="badge" style="background:#EDE7FD;color:#5B21B6">✏️ Pesanan diubah</span>'
+                : (t.draft ? '<span class="badge warn">📝 Draft</span>'
+                   : (t.dari_teknisi ? '<span class="badge ok">🔧 Selesai di Teknisi</span>'
+                   : (t.indent ? '<span class="badge" style="background:#EDE7FD;color:#5B21B6">📦 Menunggu barang</span>'
+                      : (baru ? '<span class="badge brand">🔔 Pesanan baru</span>'
+                              : '<span class="badge warn">Sedang disiapkan</span>'))))) +
+              (t.tertahan ? '<span class="badge danger">⏱ ' + t.waiting_min + ' menit</span>'
+                          : '<span class="badge">' + t.waiting_min + ' menit lalu</span>') +
+              (adaDraft ? '<span class="badge ok">SN tersimpan di layar ini</span>' : '') +
+            '</div>' +
+            (rev ? '<div class="small" style="background:#EDE7FD;color:#5B21B6;padding:7px 10px;' +
+              'border-radius:8px;font-weight:600;margin-bottom:6px">' +
+              Fmt.esc(rev.ringkas) + '<div style="font-weight:400;opacity:.8">diubah ' +
+              Fmt.esc(rev.by) + ' · ' + Fmt.esc(Fmt.jamSaja(rev.at)) + '</div></div>' : '') +
+            '<div style="font-size:19px;font-weight:800;letter-spacing:-.01em" class="mono">' +
+              Fmt.esc(t.trx_no) + '</div>' +
+            '<div style="font-size:15px;margin-top:2px">Atas nama <b>' + Fmt.esc(t.cust_name) + '</b></div>' +
+            '<div class="small muted">Sales ' + Fmt.esc(t.sales_name || '—') +
+              (t.penyiap ? ' · Disiapkan <b>' + Fmt.esc(t.penyiap) + '</b>' : '') +
+              ' · ' + t.item_count + ' item</div>' +
+
+            /*
+             * Penanda saluran.
+             *
+             * Gudang dan Eksekusi melihat antriannya masing-masing,
+             * jadi penanda ini tidak mereka butuhkan. Yang butuh
+             * Super Admin, yang melihat keduanya dalam satu daftar
+             * dan perlu membedakan mana yang mana.
+             */
+            (String(t.channel) === 'ONLINE'
+              ? '<div class="inline mt8">' +
+                '<span class="badge brand">🌐 Online' +
+                  (t.sumber ? ' · ' + Fmt.esc(t.sumber) : '') + '</span>' +
+                (t.metode_serah
+                  ? '<span class="badge">' + Fmt.esc(t.metode_serah) + '</span>' : '') +
+                '</div>'
+              : '') +
+
+            /*
+             * Permintaan tembak SN dari Tim Eksekusi.
+             *
+             * Ditandai mencolok karena Gudang BUKAN pemilik pesanan
+             * ini — tugasnya cuma mengisi SN lalu mengembalikannya.
+             * Tanpa penanda, mudah terkira pesanan biasa lalu
+             * diteruskan ke Admin, dan Eksekusi kehilangan jejak
+             * barang yang sedang disiapkannya.
+             */
+            /*
+             * Kembali dari Teknisi, menunggu diteruskan ke Admin.
+             */
+            (t.dari_teknisi
+              ? '<div class="mt8" style="background:var(--ok-soft);color:var(--ok);' +
+                'padding:8px 11px;border-radius:9px">' +
+                '<b class="small">🔧 Sudah dikerjakan Teknisi</b>' +
+                '<div class="small">Notanya belum terbit. Tekan Konfirmasi barang ' +
+                'siap untuk meneruskannya ke Admin.</div></div>'
+              : '') +
+
+            /*
+             * Draft dari Sales Online — belum dikonfirmasi.
+             */
+            (t.draft
+              ? '<div class="mt8" style="background:var(--warn-soft);color:var(--warn);' +
+                'padding:8px 11px;border-radius:9px">' +
+                '<b class="small">📝 Masih draft — belum dikonfirmasi Sales</b>' +
+                '<div class="small">' +
+                (t.ditangani
+                  ? 'Diambil ' + Fmt.esc(t.penyiap || 'seseorang') +
+                    '. Resepnya ada di menu Cetak Resep.'
+                  : 'Barangnya sudah bisa disiapkan dan resepnya bisa dicetak. ' +
+                    'Isinya masih bisa berubah sampai Sales mengonfirmasi.') +
+                '</div>' +
+
+                (t.ditangani ? ''
+                  : '<button class="btn sm mt8 gd-take" data-id="' + Fmt.esc(t.trx_id) +
+                    '">📝 Ambil &amp; cetak resep</button>') +
+                '</div>'
+              : '') +
+
+            (t.indent
+              ? '<div class="mt8" style="background:#EDE7FD;color:#5B21B6;' +
+                'padding:8px 11px;border-radius:9px">' +
+                '<b class="small">📦 Pesanan indent — barang belum datang</b>' +
+                '<div class="small">' +
+                (t.ditangani
+                  ? 'Sudah ditangani. Pantau lanjutannya di menu Menunggu Barang.'
+                  : 'Cetak resepnya dan pilih penanggung jawabnya, lalu pesanan ' +
+                    'ini pindah ke menu Menunggu Barang.') +
+'</div></div>'
+              : '') +
+
+            (t.hanya_sn && t.minta_sn_detail
+              ? '<div class="mt8" style="background:var(--warn-soft);border-radius:9px;' +
+                'padding:9px 12px;border-left:4px solid var(--warn)">' +
+                '<b class="small" style="color:var(--warn)">📦 Diminta Tim Eksekusi — ' +
+                  'bukan pesanan Anda</b>' +
+                '<div class="small" style="color:var(--warn)">Siapkan barang di ' +
+                  'bawah ini dan isi SN-nya kalau perlu, lalu tekan "Barang siap" — ' +
+                  'jangan diteruskan ke Admin. Diminta ' +
+                  Fmt.esc(t.minta_sn_detail.oleh) + '.</div>' +
+                '<div class="small mt8">' +
+                  t.minta_sn_detail.barang.map(function (b) {
+                    return '• ' + Fmt.esc(b.nama) +
+                      (b.qty > 1 ? ' (' + b.qty + ' unit)' : '') +
+                      (b.perlu_sn ? ' — perlu SN' : '');
+                  }).join('<br>') + '</div>' +
+                (t.minta_sn_detail.catatan
+                  ? '<div class="small muted mt8">' +
+                    Fmt.esc(t.minta_sn_detail.catatan) + '</div>' : '') +
+                '</div>'
+              : '') +
+            (t.order_note ? '<div class="small mt8" style="background:var(--warn-soft);' +
+              'padding:7px 10px;border-radius:8px;color:var(--warn);font-weight:600">📝 ' +
+              Fmt.esc(t.order_note) + '</div>' : '') +
+          '</div>' +
+          '<button class="btn lg">' +
+            (t.lihat_saja ? 'Lihat isi'
+             : (rev ? 'Cek ulang' : (baru ? 'Siapkan' : 'Lanjutkan'))) + '</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+
+    /*
+     * Mengambil pesanan indent.
+     *
+     * Dilakukan dengan mencetak resepnya, karena di situlah namanya
+     * dicatat. Tanpa ini Sales tidak tahu pesanannya sudah dipegang
+     * siapa — dan itu yang membuat pesanan indent sering terlupakan.
+     */
+    document.querySelectorAll('.gd-take').forEach(function (b) {
+      b.onclick = function (e) {
+        e.stopPropagation();
+        Resep.cetakDenganPic(b.dataset.id, b, '🖨 Ambil & cetak resep',
+          function () { App.pages.queue.load(); });
+      };
+    });
+
+    document.getElementById('gd-list').onclick = function (e) {
+      var card = e.target.closest('[data-id]'); if (!card) return;
+      if (e.target.closest('.gd-take')) return;
+
+      /*
+       * Pesanan indent dibuka untuk dilihat, bukan dikerjakan.
+       *
+       * Tombol biasa akan ditolak karena tahapnya bukan penyiapan —
+       * padahal yang diminta cuma melihat isinya. Kalau Sales
+       * bertanya isi pesanannya apa, jawabannya tidak boleh "saya
+       * tidak bisa membukanya".
+       */
+      var baris = (P.s.list || []).filter(function (x) {
+        return String(x.trx_id) === card.dataset.id;
+      })[0];
+
+      if (baris && baris.lihat_saja) {
+        App.pages.done.lihat(card.dataset.id, 'queue');
+        return;
+      }
+
+      App.go('queue', card.dataset.id);
+    };
+  },
+
+  /* ================= LAYAR SIAPKAN BARANG ================= */
+
+  kunciDraft: function (trxId) { return 'els_sn_' + trxId; },
+
+  bukaDetail: function (trxId, bacaSaja) {
+    var P = App.pages.queue;
+    Alarm.stop();
+
+    /*
+     * Pesanan yang sudah lewat tahap Gudang tetap bisa dibuka untuk
+     * dilihat. Yang dipanggil fungsi yang berbeda — satu menandai
+     * "mulai menyiapkan", satu lagi sekadar membaca.
+     */
+    var fn = bacaSaja ? 'apiLihatPesanan' : 'apiStartPrepare';
+
+    api(fn, { trx_id: trxId, idem: uid() }).then(function (d) {
+      P.d = d;
+
+      // SN yang sudah tersimpan di server jadi dasar, lalu ditimpa
+      // oleh yang masih tersimpan sementara di browser.
+      P.lokal = {};
+      d.items.forEach(function (i) {
+        P.lokal[i.item_id] = (i.sns || []).slice();
+        while (P.lokal[i.item_id].length < i.qty) P.lokal[i.item_id].push('');
+      });
+
+      var draft = Store.get(P.kunciDraft(trxId));
+      var adaDraft = false;
+      if (draft) {
+        try {
+          var simpan = JSON.parse(draft);
+          d.items.forEach(function (i) {
+            if (!simpan[i.item_id]) return;
+            for (var u = 0; u < i.qty; u++) {
+              var nilai = String(simpan[i.item_id][u] || '').trim();
+              if (nilai && nilai !== P.lokal[i.item_id][u]) {
+                P.lokal[i.item_id][u] = nilai;
+                adaDraft = true;
+              }
+            }
+          });
+        } catch (e) {}
+      }
+
+      P.renderDetail();
+      if (adaDraft) toast('SN yang tadi dipindai dimunculkan kembali. Belum tersimpan sampai Anda konfirmasi.', 'ok');
+    }).catch(function (e) {
+      document.getElementById('gd-root').innerHTML =
+        '<div class="empty"><b>Pesanan tidak bisa dibuka</b>' + Fmt.esc(e.message) +
+        '<div class="mt16"><button class="btn ghost" onclick="App.go(\'queue\')">Kembali ke antrian</button></div></div>';
+    });
+  },
+
+  simpanDraft: function () {
+    var P = App.pages.queue;
+    if (!P.d) return;
+    try { Store.set(P.kunciDraft(P.d.header.trx_id), JSON.stringify(P.lokal)); } catch (e) {}
+  },
+
+  hapusDraft: function (trxId) {
+    try { Store.del('els_sn_' + trxId); } catch (e) {}
+  },
+
+  /** Hitung kelengkapan SN dari data di layar, tanpa menghubungi server */
+  /* Apakah pesanan ini memuat barang yang bertanda perlu SN */
+  pilihanKerja: null,
+
+  muatPilihanKerja: function () {
+    var P = App.pages.queue;
+    if (P.pilihanKerja) return;
+
+    api('apiPilihanOnline', {}).then(function (p) {
+      P.pilihanKerja = p.kerja && p.kerja.length ? p.kerja : null;
+    }).catch(function () {});
+  },
+
+  adaBarangSn: function () {
+    var P = App.pages.queue;
+    var ada = false;
+    (P.d.items || []).forEach(function (i) { if (i.need_sn) ada = true; });
+    return ada;
+  },
+
+  hitungSn: function () {
+    var P = App.pages.queue;
+    var perlu = 0, isi = 0, kurang = [], totalIsi = 0;
+
+    P.d.items.forEach(function (i) {
+      var n = 0;
+      for (var u = 0; u < i.qty; u++) {
+        if (String(P.lokal[i.item_id][u] || '').trim()) n++;
+      }
+      totalIsi += n;
+
+      if (!i.need_sn) return;          // barang tanpa tanda tidak dihitung wajib
+      perlu += i.qty;
+      isi += n;
+      if (n < i.qty) kurang.push(i.product_name + ' (' + n + '/' + i.qty + ')');
+    });
+
+    return { perlu: perlu, isi: isi, totalIsi: totalIsi,
+             kurang: kurang, lengkap: kurang.length === 0 };
+  },
+
+  renderDetail: function () {
+    var P = App.pages.queue;
+    var h = P.d.header;
+    var sn = P.hitungSn();
+
+    document.getElementById('gd-root').innerHTML =
+      '<div class="card">' +
+        '<div class="between">' +
+          '<div>' +
+            '<div style="font-size:22px;font-weight:800" class="mono">' + Fmt.esc(h.trx_no) + '</div>' +
+            '<div style="font-size:16px;margin-top:3px">Atas nama <b>' + Fmt.esc(h.cust_name) + '</b></div>' +
+            '<div class="small muted">' + Fmt.esc(h.cust_phone) +
+              (h.cust_email ? ' · ' + Fmt.esc(h.cust_email) : '') +
+              ' · Sales ' + Fmt.esc(h.sales_name || '—') +
+              ' · ' + h.item_count + ' item, ' + h.total_qty + ' unit</div>' +
+          '</div>' +
+          '<button class="btn ghost" id="gd-back">Kembali</button>' +
+        '</div>' +
+        (h.revisi ?
+          '<div class="mt16" style="background:#EDE7FD;padding:12px 14px;border-radius:10px;' +
+            'border-left:4px solid #7c3aed">' +
+          '<div class="small" style="color:#5B21B6;font-weight:700;margin-bottom:3px">' +
+            '✏️ Pesanan ini diubah — cek ulang barangnya</div>' +
+          '<div style="font-size:15px">' + Fmt.esc(h.revisi.ringkas) + '</div>' +
+          '<div class="small muted">diubah ' + Fmt.esc(h.revisi.by) + ' · ' +
+            Fmt.esc(Fmt.jam(h.revisi.at)) + '</div></div>' : '') +
+        (h.order_note ?
+          '<div class="mt16" style="background:var(--warn-soft);padding:12px 14px;border-radius:10px">' +
+          '<div class="small" style="color:var(--warn);font-weight:700;margin-bottom:3px">Keterangan dari Sales</div>' +
+          '<div style="font-size:15px">' + Fmt.esc(h.order_note) + '</div></div>' : '') +
+      '</div>' +
+
+      (P.d.petugas && P.d.petugas.length ?
+      '<div class="card mt16">' +
+        '<div class="field mb0"><label>Barang disiapkan oleh</label>' +
+          '<select id="gd-petugas" style="font-size:16px;padding:12px">' +
+            '<option value="">— pilih nama —</option>' +
+            P.d.petugas.map(function (p) {
+              return '<option value="' + Fmt.esc(p.code) + '"' +
+                (h.gudang_petugas === p.code ? ' selected' : '') + '>' +
+                Fmt.esc(p.name) + '</option>';
+            }).join('') +
+          '</select>' +
+          '<div class="note">Tercatat di riwayat transaksi. Kalau nanti ada barang yang keliru, ' +
+            'yang menyiapkan bisa ditanya langsung.</div>' +
+        '</div></div>' : '') +
+
+      (sn.perlu ?
+      '<div class="card mt16">' +
+        '<div class="between">' +
+          '<b style="font-size:15px">Barang yang biasanya ber-SN: <span id="gd-sncount">' +
+            sn.isi + ' dari ' + sn.perlu + '</span></b>' +
+          '<span class="badge ' + (sn.lengkap ? 'ok' : 'danger') + '" id="gd-snbadge">' +
+            (sn.lengkap ? 'Lengkap' : (sn.perlu - sn.isi) + ' belum diisi') + '</span>' +
+        '</div>' +
+        '<div style="height:8px;background:var(--line);border-radius:99px;margin-top:10px;overflow:hidden">' +
+          '<div id="gd-snbar" style="height:100%;width:' +
+            (sn.perlu ? Math.round((sn.isi / sn.perlu) * 100) : 100) +
+            '%;background:var(--ok);transition:width .2s"></div></div>' +
+        '<div class="small muted mt8">Penanda ini tebakan sistem dari nama dan kode barang. ' +
+          'Kalau meleset, kosongkan saja — nanti tinggal dikonfirmasi sekali.</div>' +
+      '</div>' : '') +
+
+      '<div class="mt16">' + P.itemsHtml() + '</div>' +
+
+      /*
+       * Dua divisi, dua pekerjaan berbeda di layar yang sama.
+       *
+       * Eksekusi: menyiapkan barang, dan untuk yang ber-SN meminta
+       * Gudang menembakkannya. Pesanannya tetap miliknya sampai
+       * diteruskan ke Admin.
+       *
+       * Gudang saat menerima permintaan itu: hanya mengisi SN, lalu
+       * mengembalikannya. Bukan meneruskan ke Admin — kalau itu
+       * dilakukan, Eksekusi kehilangan jejak barang yang sedang
+       * disiapkannya.
+       */
+      /*
+       * Ditampilkan selama ada barang ber-SN, bukan hanya saat SN-nya
+       * belum lengkap.
+       *
+       * Sebelumnya saya sembunyikan begitu SN terisi. Akibatnya kalau
+       * Eksekusi sempat mengisi satu SN sendiri, tombolnya hilang dan
+       * dia tidak punya jalan meminta sisanya. Lebih baik tombolnya
+       * tetap ada dan Eksekusi yang menilai perlu atau tidak.
+       */
+      /*
+       * Barang yang diambilkan Gudang.
+       *
+       * Sebagian barang ada di gedung NB, dan Eksekusi tidak bisa
+       * mengambilnya sendiri. Yang dipilih di sini dikirim ke Gudang
+       * untuk disiapkan — sekaligus diisi SN-nya kalau memang perlu.
+       *
+       * Yang tahu barang mana ada di gedung sebelah adalah orang yang
+       * memegang pesanannya, bukan aturan di kode. Jadi dipilih
+       * sendiri, bukan ditebak dari tanda SN.
+       */
+      (App.state.session.role === 'EKSEKUSI' && !h.baca_saja
+        ? '<div class="card mt16" style="border-left:4px solid var(--warn)">' +
+          '<b>Minta Gudang menyiapkan barang</b>' +
+
+          (h.minta_sn_aktif
+            ? '<div class="ok-box mt8"><b class="small">Permintaan sudah dikirim</b>' +
+              '<div class="small muted">Menunggu Gudang menyiapkan. Begitu selesai, ' +
+              'SN yang diisi Gudang langsung tampil di daftar barang di atas — ' +
+              'muat ulang halaman kalau belum terlihat.</div></div>' +
+              '<button class="btn ghost sm mt8" id="gd-batalsn">Batalkan permintaan</button>'
+
+            : '<p class="hint">Centang barang yang ada di Gudang NB. Gudang ' +
+              'menyiapkannya dan mengisi SN kalau perlu, lalu menyerahkannya ke Anda.</p>' +
+              '<div id="gd-pilihbrg">' +
+                P.d.items.map(function (i) {
+                  return '<label class="inline" style="font-weight:500;display:flex;' +
+                    'padding:7px 0;border-bottom:1px solid var(--line-2)">' +
+                    '<input type="checkbox" class="gd-brg-cek" value="' +
+                      Fmt.esc(i.item_id) + '" style="width:auto">' +
+                    '<span style="flex:1">' + Fmt.esc(i.product_name) +
+                      (i.qty > 1 ? ' <b>(' + i.qty + ' unit)</b>' : '') +
+                      (i.need_sn ? ' <span class="badge warn">perlu SN</span>' : '') +
+                    '</span></label>';
+                }).join('') +
+              '</div>' +
+              '<button class="btn block mt16" id="gd-mintasn">' +
+                '📦 Kirim ke Gudang</button>') +
+          '</div>'
+        : '') +
+
+      (h.hanya_sn
+        ? '<div class="card mt16" style="border-left:4px solid var(--warn)">' +
+          '<b style="color:var(--warn)">Permintaan dari Tim Eksekusi</b>' +
+          '<p class="hint">Pesanan ini milik Tim Eksekusi. Siapkan barang yang ' +
+          'diminta dan isi SN-nya kalau perlu, lalu tekan tombol di bawah — ' +
+          'jangan tekan Konfirmasi barang siap.</p>' +
+          '<button class="btn block lg" id="gd-snselesai">✓ Barang siap, ' +
+            'serahkan ke Eksekusi</button>' +
+          '</div>'
+        : '') +
+
+      /*
+       * Pesanan online: perlu Teknisi atau tidak.
+       *
+       * Ditanyakan di sini karena yang menyiapkan barangnya yang
+       * paling tahu isinya. Laptop perlu aktivasi; mouse, tas, dan
+       * tinta tidak — dan memaksanya lewat Teknisi membuat antrian
+       * di sana penuh barang yang cuma lewat.
+       */
+      /*
+       * Apa yang harus dikerjakan Teknisi.
+       *
+       * Bukan sekadar perlu atau tidak — Teknisi perlu tahu
+       * pekerjaannya apa. Aktivasi, rakit, inkcharging, cek unit:
+       * alat dan waktunya berbeda-beda, dan tanpa keterangan dia
+       * harus bertanya dulu sebelum mulai.
+       *
+       * Tidak ada yang dicentang berarti tidak perlu lewat Teknisi —
+       * barangnya langsung masuk daftar Siap Diserahkan.
+       */
+      (App.state.session.role === 'EKSEKUSI' && !h.hanya_sn && !h.baca_saja
+        ? '<div class="card mt16">' +
+          '<b>Yang perlu dikerjakan Teknisi</b>' +
+          '<div class="note" style="margin-bottom:10px">Kosongkan semua kalau ' +
+          'barangnya tinggal diserahkan — misalnya aksesori atau tinta.</div>' +
+          '<div class="inline" id="gd-kerja">' +
+            (App.pages.queue.pilihanKerja || ['Aktivasi', 'Rakit PC', 'Inkcharging', 'Cek unit'])
+              .map(function (k) {
+                return '<label class="inline" style="font-weight:500;' +
+                  'border:1.5px solid var(--line);border-radius:99px;padding:7px 13px">' +
+                  '<input type="checkbox" class="gd-kerja-cek" value="' + Fmt.esc(k) +
+                  '" style="width:auto"><span>' + Fmt.esc(k) + '</span></label>';
+              }).join('') +
+          '</div>' +
+
+          /*
+           * Pesan untuk Teknisi.
+           *
+           * Kadang barangnya tidak boleh langsung dikerjakan —
+           * customer minta ditunggu sampai dia datang. Tanpa pesan,
+           * Teknisi mengerjakannya begitu masuk antrian, dan
+           * pekerjaannya jadi mubazir kalau pesanannya batal.
+           */
+          '<div class="field mt16 mb0">' +
+            '<label>Pesan untuk Teknisi (opsional)</label>' +
+            '<input type="text" id="gd-cattek" maxlength="200" value="' +
+              Fmt.esc(h.catatan_teknisi || '') + '" ' +
+              'placeholder="contoh: dikerjakan setelah customer datang">' +
+            '<div class="note">Muncul mencolok di layar Teknisi, dibacakan juga ' +
+            'saat pesanannya dibuka.</div>' +
+          '</div>' +
+          '</div>'
+        : '') +
+
+      (h.baca_saja
+        ? '<div class="card mt16" style="border-left:4px solid var(--muted)">' +
+          '<b>Hanya untuk dilihat</b>' +
+          '<div class="small muted">Pesanan ini sudah lewat tahap penyiapan — ' +
+          'status sekarang ' + Fmt.esc(h.stage_label) + '. Isinya bisa dibaca, ' +
+          'tapi tidak bisa diubah dari sini.</div>' +
+          '<button class="btn ghost mt16" onclick="App.go(\'done\')">Kembali</button>' +
+          '</div>'
+        : '') +
+
+      (h.baca_saja ? '' :
+      '<div class="card mt16"' + (h.hanya_sn ? ' style="opacity:.55"' : '') + '>' +
+        '<button class="btn block lg" id="gd-confirm"' +
+          (h.hanya_sn ? ' disabled' : '') + '>Konfirmasi barang siap</button>' +
+
+        /*
+         * Jalur pintas: dikerjakan Teknisi dulu, notanya menyusul.
+         *
+         * Ada customer yang minta unitnya dirakit atau diaktivasi
+         * dulu lalu datang membayar belakangan — kadang bukan di
+         * hari yang sama. Memaksa nota terbit lebih dulu berarti
+         * Admin menerbitkan nota untuk barang yang belum tentu jadi
+         * diambil.
+         *
+         * Setelah Teknisi selesai, pesanannya kembali ke Admin lalu
+         * Kasir. Tidak ada yang bisa keluar tanpa melewati keduanya.
+         */
+        (App.state.session.role === 'EKSEKUSI' && !h.hanya_sn
+          ? '<button class="btn block ghost mt8" id="gd-keteknisi">' +
+            '🔧 Kerjakan Teknisi dulu, nota menyusul</button>' +
+            '<p class="note mb0">Dipakai kalau customer minta dikerjakan sekarang ' +
+            'dan membayar saat mengambil. Setelah Teknisi selesai, pesanannya ' +
+            'kembali ke sini — Anda yang meneruskannya ke Admin. Kalau Admin ' +
+            'sempat menerbitkan nota selagi Teknisi bekerja, alurnya lanjut ' +
+            'sendiri ke Kasir.</p>'
+          : '') +
+        '<p class="small muted mt8 mb0" id="gd-note">' +
+          (sn.lengkap
+            ? 'Tekan setelah seluruh barang benar-benar sudah disiapkan. SN akan tersimpan sekaligus, ' +
+              'lalu pesanan diteruskan ke Admin.'
+            : 'Belum diisi SN: ' + Fmt.esc(sn.kurang.join(', ')) +
+              ' — masih bisa dilanjutkan kalau barangnya memang tanpa SN.') +
+        '</p>' +
+      '</div>');
+
+
+    // Percakapan divisi menempel di bawah layarnya
+    document.getElementById('gd-root').insertAdjacentHTML('beforeend',
+      '<div id="chat-box"></div>');
+    Chat.pasang(P.d.header.trx_id, 'chat-box');
+
+    P.bindDetail();
+  },
+
+  itemsHtml: function () {
+    var P = App.pages.queue;
+
+    return '<div class="card">' +
+      '<h3 style="margin-bottom:14px">Barang yang disiapkan</h3>' +
+      P.d.items.map(function (i, n) {
+        var nilai = P.lokal[i.item_id] || [];
+        var terisi = nilai.filter(function (x) { return String(x || '').trim(); }).length;
+        var lengkap = !i.need_sn || terisi >= i.qty;
+        var garisItem = terisi > 0 ? 'var(--ok)' : (i.need_sn ? 'var(--warn)' : 'var(--line)');
+
+        // Semua barang punya kotak SN. Yang tidak bertanda boleh
+        // dikosongkan tanpa peringatan apa pun.
+        var kotak = '';
+        for (var u = 0; u < i.qty; u++) {
+          var v = String(nilai[u] || '');
+          kotak +=
+            '<div style="display:flex;align-items:center;gap:9px;margin-bottom:7px">' +
+              '<span class="small muted" style="width:52px;flex-shrink:0">Unit ' + (u + 1) + '</span>' +
+              '<input type="text" class="gd-sn mono" data-item="' + Fmt.esc(i.item_id) + '" ' +
+                'data-seq="' + u + '" value="' + Fmt.esc(v) + '" autocomplete="off" ' +
+                'placeholder="' + (i.need_sn ? 'pindai atau ketik SN' : 'kosongkan kalau tidak ada SN') +
+                '" style="font-size:15px;padding:9px 11px' +
+                (v ? ';border-color:var(--ok);background:var(--ok-soft)' : '') + '">' +
+            '</div>';
+        }
+
+        // Barang yang memang tidak ber-SN tidak perlu menampilkan kotak
+        // kosong. Tas, software, dan jasa cukup punya satu tautan kecil —
+        // layar jadi rapi dan yang penting lebih mudah terlihat.
+        var snBox;
+
+        if (i.need_sn || terisi > 0) {
+          snBox =
+            '<div style="margin-top:12px;padding:12px;background:var(--paper);border-radius:10px">' +
+              '<div class="between" style="margin-bottom:9px">' +
+                '<b class="small">Serial Number</b>' +
+                '<span class="badge ' + (lengkap ? 'ok' : 'danger') + '" ' +
+                  'id="gd-itembadge-' + Fmt.esc(i.item_id) + '">' + terisi + ' / ' + i.qty + '</span>' +
+              '</div>' + kotak +
+              (i.alasan_sn
+                ? '<div class="small" style="color:var(--warn)">Ditandai perlu SN — ' +
+                  Fmt.esc(i.alasan_sn) + '</div>'
+                : '<div class="small muted">Kosongkan saja kalau barang ini tidak punya SN.</div>') +
+            '</div>';
+        } else {
+          snBox =
+            '<div style="margin-top:10px">' +
+              '<button class="btn sm ghost gd-buka-sn" data-item="' + Fmt.esc(i.item_id) + '">' +
+                '+ Isi Serial Number</button>' +
+            '</div>' +
+            '<div id="gd-snwrap-' + Fmt.esc(i.item_id) + '" style="display:none;' +
+              'margin-top:10px;padding:12px;background:var(--paper);border-radius:10px">' +
+              '<div class="between" style="margin-bottom:9px">' +
+                '<b class="small">Serial Number</b>' +
+                '<span class="badge" id="gd-itembadge-' + Fmt.esc(i.item_id) + '">' +
+                  terisi + ' / ' + i.qty + '</span>' +
+              '</div>' + kotak +
+            '</div>';
+        }
+
+        return '<div style="padding:14px 0;border-top:' + (n === 0 ? '0' : '1px solid var(--line)') + '">' +
+          '<div style="display:flex;gap:12px;align-items:flex-start">' +
+            '<div id="gd-bar-' + Fmt.esc(i.item_id) + '" style="width:5px;align-self:stretch;background:' +
+              garisItem + ';border-radius:3px"></div>' +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-size:17px;font-weight:700">' + Fmt.esc(i.product_name) + '</div>' +
+              '<div class="small muted">' + Fmt.esc(i.product_code) +
+                (i.source === 'MANUAL' ? ' · <span style="color:var(--warn);font-weight:700">barang manual</span>' : '') +
+                '</div>' +
+              (i.need_sn ? '<div class="small" style="color:var(--warn);font-weight:600">Biasanya punya SN</div>' : '') +
+              (i.item_note ? '<div class="small mt8">📝 ' + Fmt.esc(i.item_note) + '</div>' : '') +
+              snBox +
+            '</div>' +
+            '<div style="text-align:center;min-width:64px">' +
+              '<div style="font-size:28px;font-weight:800;line-height:1">' + i.qty + '</div>' +
+              '<div class="small muted">unit</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      }).join('') +
+      '<div class="small muted mt16">Sistem hanya bisa memeriksa kelengkapan Serial Number. ' +
+        'Barang tanpa SN dipercayakan pada pengecekan Anda sendiri sebelum menekan konfirmasi.</div>' +
+    '</div>';
+  },
+
+  /** Memperbarui angka dan warna saja — kotak input tidak pernah dibuat ulang */
+  segarkanPenanda: function (itemId) {
+    var P = App.pages.queue;
+    var it = P.d.items.filter(function (x) { return x.item_id === itemId; })[0];
+
+    if (it && it.need_sn) {
+      var nilai = P.lokal[itemId] || [];
+      var terisi = 0;
+      for (var u = 0; u < it.qty; u++) if (String(nilai[u] || '').trim()) terisi++;
+      var lengkap = terisi >= it.qty;
+
+      var badge = document.getElementById('gd-itembadge-' + itemId);
+      if (badge) {
+        badge.textContent = terisi + ' / ' + it.qty;
+        badge.className = 'badge ' + (lengkap ? 'ok' : 'danger');
+      }
+      var bar = document.getElementById('gd-bar-' + itemId);
+      if (bar) bar.style.background = terisi > 0 ? 'var(--ok)' : 'var(--warn)';
+    } else {
+      var badge2 = document.getElementById('gd-itembadge-' + itemId);
+      if (badge2 && it) {
+        var n2 = 0;
+        var nilai2 = P.lokal[itemId] || [];
+        for (var v = 0; v < it.qty; v++) if (String(nilai2[v] || '').trim()) n2++;
+        badge2.textContent = n2 + ' / ' + it.qty;
+      }
+      var bar2b = document.getElementById('gd-bar-' + itemId);
+      if (bar2b) {
+        var adaIsi = (P.lokal[itemId] || []).some(function (x) { return String(x || '').trim(); });
+        bar2b.style.background = adaIsi ? 'var(--ok)' : 'var(--line)';
+      }
+    }
+
+    var sn = P.hitungSn();
+    var c = document.getElementById('gd-sncount');
+    if (c) c.textContent = sn.isi + ' dari ' + sn.perlu;
+    var b = document.getElementById('gd-snbadge');
+    if (b) {
+      b.textContent = sn.lengkap ? 'Lengkap' : (sn.perlu - sn.isi) + ' belum diisi';
+      b.className = 'badge ' + (sn.lengkap ? 'ok' : 'danger');
+    }
+    var bar2 = document.getElementById('gd-snbar');
+    if (bar2) bar2.style.width = (sn.perlu ? Math.round((sn.isi / sn.perlu) * 100) : 100) + '%';
+
+    var note = document.getElementById('gd-note');
+    if (note) {
+      note.textContent = sn.lengkap
+        ? 'Tekan setelah seluruh barang benar-benar sudah disiapkan. SN akan tersimpan sekaligus, lalu pesanan diteruskan ke Admin.'
+        : 'Belum diisi SN: ' + sn.kurang.join(', ') +
+          ' — masih bisa dilanjutkan kalau barangnya memang tanpa SN.';
+      note.style.color = sn.lengkap ? '' : 'var(--warn)';
+    }
+  },
+
+  bindDetail: function () {
+    var P = App.pages.queue;
+    var hh = P.d.header;
+
+    /* ---------- Eksekusi minta Gudang menembak SN ---------- */
+    var bMinta = document.getElementById('gd-mintasn');
+    if (bMinta) bMinta.onclick = function () {
+      var pilih = [];
+      document.querySelectorAll('.gd-brg-cek').forEach(function (c) {
+        if (c.checked) pilih.push(c.value);
+      });
+
+      if (!pilih.length) {
+        return toast('Centang dulu barang mana yang mau dikirim ke Gudang.', 'err');
+      }
+
+      Modal.open({
+        title: 'Kirim ' + pilih.length + ' barang ke Gudang?',
+        sub: 'Gudang NB langsung diberi tahu dengan alarm. Pesanan ini tetap ' +
+             'milik Anda — Gudang menyiapkan barangnya lalu mengembalikannya.',
+        okText: 'Kirim permintaan',
+        body: '<div class="field mb0"><label>Pesan untuk Gudang (opsional)</label>' +
+          '<input type="text" id="gd-mintanote" ' +
+          'placeholder="contoh: ditunggu, customer sedang di toko"></div>',
+        onOk: function (close, btn) {
+          var el = document.getElementById('gd-mintanote');
+          close();
+          toast('Permintaan dikirim ke Gudang…', 'ok');
+
+          Latar.simpan('apiMintaTembakSn', {
+            trx_id: hh.trx_id, item_ids: pilih,
+            catatan: el ? el.value : '', idem: uid()
+          }, {
+            judul: 'Kirim barang ke Gudang · ' + hh.trx_no,
+            keterangan: 'Buka lagi pesanannya dan kirim permintaannya sekali lagi.',
+            berhasil: function (r) {
+              toast(r.pesan, 'ok', '🏷 Gudang sudah diberi tahu');
+              P.bukaDetail(hh.trx_id);
+            }
+          }).catch(function () {});
+        }
+      });
+    };
+
+    var bBatal = document.getElementById('gd-batalsn');
+    if (bBatal) bBatal.onclick = function () {
+      Modal.confirm('Batalkan permintaan tembak SN?',
+        'Dipakai kalau ternyata salah kirim atau barangnya sudah Anda tangani sendiri.',
+        'Ya, batalkan', function () {
+          api('apiBatalMintaSn', { trx_id: hh.trx_id, idem: uid() })
+            .then(function () { toast('Permintaan dibatalkan.', 'ok'); P.bukaDetail(hh.trx_id); })
+            .catch(function (e) { toast(e.message, 'err'); });
+        });
+    };
+
+    /* ---------- Gudang menyelesaikan permintaan ---------- */
+    var bSel = document.getElementById('gd-snselesai');
+    if (bSel) bSel.onclick = function () {
+      Modal.open({
+        title: 'Barang siap, serahkan ke Eksekusi?',
+        sub: 'Tim Eksekusi langsung diberi tahu bahwa barangnya bisa diambil, ' +
+             'dan SN yang Anda isi akan tampil di layar mereka. Pesanannya tetap ' +
+             'mereka yang meneruskan ke Admin.',
+        okText: 'Ya, sudah siap',
+        body: '<div class="field mb0"><label>Catatan (opsional)</label>' +
+          '<input type="text" id="gd-selnote" ' +
+          'placeholder="contoh: unit kedua memang tanpa SN"></div>',
+        onOk: function (close, btn) {
+          var el = document.getElementById('gd-selnote');
+          btnBusy(btn, true, 'Menyimpan');
+
+          api('apiSnSelesai', {
+            trx_id: hh.trx_id, sn: P.lokal,
+            catatan: el ? el.value : '', idem: uid()
+          }).then(function (r) {
+            close();
+            toast(r.pesan, 'ok',
+              r.tersimpan ? '✓ ' + r.tersimpan + ' SN tersimpan'
+                          : '✓ Dikembalikan ke Eksekusi');
+            App.kembali('queue');
+          }).catch(function (e) {
+            btnBusy(btn, false, 'Ya, sudah siap');
+
+            /*
+             * Kalau SN-nya belum lengkap, server menahan. Ditawarkan
+             * melanjutkan dengan keterangan — kadang barangnya memang
+             * tanpa SN, dan itu harus dijelaskan bukan dilewati diam-diam.
+             */
+            if (e.code === 'SN_BELUM') {
+              Modal.confirm('SN belum lengkap',
+                e.message + ' Lanjutkan dengan keterangan itu?',
+                'Ya, lanjutkan', function () {
+                  api('apiSnSelesai', {
+                    trx_id: hh.trx_id, abaikan: true, sn: P.lokal,
+                    catatan: (el ? el.value : '') || 'Barang memang tanpa SN',
+                    idem: uid()
+                  }).then(function () {
+                    close();
+                    toast('Dikembalikan ke Eksekusi.', 'ok');
+                    App.kembali('queue');
+                  }).catch(function (e2) { toast(e2.message, 'err'); });
+                });
+              return;
+            }
+
+            toast(e.message, 'err');
+          });
+        }
+      });
+    };
+
+    var bBack = document.getElementById('gd-back');
+    if (bBack) bBack.onclick = function () {
+      P.simpanDraft();
+      App.kembali('queue');
+    };
+
+    // Pilihan nama petugas diingat per perangkat, supaya orang yang sama
+    // tidak perlu memilih ulang setiap pesanan.
+    var selP = document.getElementById('gd-petugas');
+    if (selP) {
+      if (!selP.value) {
+        var ingat = Store.get('els_petugas_gudang');
+        if (ingat) selP.value = ingat;
+      }
+      selP.onchange = function () {
+        Store.set('els_petugas_gudang', selP.value);
+        P.petugasKode = selP.value;
+        P.petugasNama = selP.value
+          ? selP.options[selP.selectedIndex].text : '';
+
+        /*
+         * Disimpan sekarang juga, di latar belakang.
+         *
+         * Resep dicetak sebelum barang disiapkan — itu memang
+         * gunanya. Kalau nama penyiapnya baru tersimpan saat
+         * konfirmasi di akhir, resepnya selalu tercetak dengan
+         * tanda strip di bagian itu.
+         */
+        api('apiSetPetugas', {
+          trx_id: P.d.header.trx_id, petugas: selP.value, idem: uid()
+        }).catch(function () {});
+      };
+      // Simpan juga nilai awalnya, kalau sudah terisi dari ingatan
+      P.petugasKode = selP.value || '';
+      P.petugasNama = selP.value ? selP.options[selP.selectedIndex].text : '';
+    }
+
+    // Barang tanpa SN baru menampilkan kotaknya kalau diminta
+    document.querySelectorAll('.gd-buka-sn').forEach(function (b) {
+      b.onclick = function () {
+        var wrap = document.getElementById('gd-snwrap-' + b.dataset.item);
+        if (!wrap) return;
+        wrap.style.display = 'block';
+        b.style.display = 'none';
+        var kotak1 = wrap.querySelector('.gd-sn');
+        if (kotak1) kotak1.focus();
+      };
+    });
+
+    var kotak = Array.prototype.slice.call(document.querySelectorAll('.gd-sn'));
+
+    kotak.forEach(function (el, urutan) {
+      // Mengetik hanya mengubah data di layar. Tidak ada panggilan ke
+      // server, tidak ada apa pun yang digambar ulang.
+      el.oninput = function () {
+        var itemId = el.dataset.item;
+        var seq = Number(el.dataset.seq);
+        var v = el.value.trim().toUpperCase();
+        P.lokal[itemId][seq] = v;
+
+        el.style.borderColor = v ? 'var(--ok)' : '';
+        el.style.background = v ? 'var(--ok-soft)' : '';
+
+        P.segarkanPenanda(itemId);
+        P.simpanDraft();
+      };
+
+      el.onkeydown = function (e) {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+
+        var v = el.value.trim().toUpperCase();
+        if (v) {
+          // Peringatkan langsung kalau SN kembar di layar yang sama
+          var kembar = false;
+          Object.keys(P.lokal).forEach(function (id) {
+            P.lokal[id].forEach(function (x, n) {
+              if (String(x || '').trim().toUpperCase() !== v) return;
+              if (id === el.dataset.item && n === Number(el.dataset.seq)) return;
+              kembar = true;
+            });
+          });
+          if (kembar) {
+            Bunyi.salah();
+            toast('SN "' + v + '" sudah diisi di kotak lain pada pesanan ini.', 'err');
+            el.select();
+            return;
+          }
+          Bunyi.scanOk();
+        }
+
+        for (var n = urutan + 1; n < kotak.length; n++) {
+          if (!kotak[n].value.trim()) { kotak[n].focus(); return; }
+        }
+        el.blur();
+      };
+    });
+
+    var fokusPertama = kotak.filter(function (k) { return !k.value.trim(); })[0];
+    if (fokusPertama) fokusPertama.focus();
+
+    /*
+     * Tombolnya tidak selalu ada.
+     *
+     * Pada layar baca-saja — pesanan yang sudah lewat tahap Gudang —
+     * tombol konfirmasi sengaja tidak digambar. Memasang penangannya
+     * tanpa memeriksa dulu membuat seluruh layar gagal terbuka,
+     * padahal yang hilang cuma satu tombol.
+     */
+    var bConfirm = document.getElementById('gd-confirm');
+    if (bConfirm) bConfirm.onclick = function () { P.konfirmasi(this); };
+
+    var bTek = document.getElementById('gd-keteknisi');
+    if (bTek) bTek.onclick = function () {
+      Modal.confirm('Kerjakan Teknisi dulu?',
+        'Pesanan langsung masuk antrian Teknisi tanpa nota. Setelah selesai ' +
+        'dikerjakan, pesanannya kembali ke daftar Anda — barangnya tetap tidak ' +
+        'bisa diserahkan sebelum lewat Admin dan Kasir.',
+        'Ya, kirim ke Teknisi', function () {
+          P.konfirmasi(bTek, true);
+        });
+    };
+  },
+
+  konfirmasi: function (tombol, keTeknisi) {
+    var P = App.pages.queue;
+    var h = P.d.header;
+    var sn = P.hitungSn();
+
+    // Nama petugas diambil SEKARANG, selagi kotak pilihannya masih di layar.
+    var selCek = document.getElementById('gd-petugas');
+    if (selCek) {
+      if (!selCek.value) {
+        Bunyi.salah();
+        toast('Pilih dulu nama yang menyiapkan barang ini.', 'err');
+        selCek.focus();
+        return;
+      }
+      P.petugasKode = selCek.value;
+      P.petugasNama = selCek.options[selCek.selectedIndex].text;
+    } else {
+      P.petugasKode = '';
+      P.petugasNama = '';
+    }
+
+    Modal.open({
+      title: keTeknisi
+        ? 'Kirim ke Teknisi tanpa nota?'
+        : 'Semua barang sudah disiapkan?',
+      sub: keTeknisi
+        ? 'SN tersimpan dan pesanan masuk antrian Teknisi. Setelah selesai ' +
+          'dikerjakan, kembali ke Admin untuk nota lalu ke Kasir.'
+        : 'Pastikan barang fisiknya benar-benar lengkap dan sesuai. ' +
+          'Setelah ini SN tersimpan dan pesanan diteruskan ke Admin.',
+      okText: keTeknisi ? 'Ya, kirim ke Teknisi' : 'Ya, barang siap',
+      body:
+        '<div class="between"><span class="muted">Nomor</span><b class="mono">' +
+          Fmt.esc(h.trx_no) + '</b></div>' +
+        '<div class="between mt8"><span class="muted">Customer</span><b>' +
+          Fmt.esc(h.cust_name) + '</b></div>' +
+        (P.petugasNama
+          ? '<div class="between mt8"><span class="muted">Disiapkan oleh</span><b>' +
+            Fmt.esc(P.petugasNama) + '</b></div>' : '') +
+        '<div class="between mt8"><span class="muted">Barang</span><b>' +
+          h.item_count + ' item · ' + h.total_qty + ' unit</b></div>' +
+        (sn.perlu ? '<div class="between mt8"><span class="muted">Serial Number</span><b>' +
+          sn.isi + ' / ' + sn.perlu + '</b></div>' : ''),
+      onOk: function (close, btn) {
+        btnBusy(btn, true, 'Menyimpan');
+        P.kirimKonfirmasi(close, btn, false, '', keTeknisi);
+      }
+    });
+  },
+
+  /**
+   * Mengirim konfirmasi ke server.
+   *
+   * abaikanSn = lanjut walaupun ada barang bertanda SN yang dikosongkan.
+   * Penanda SN cuma tebakan sistem, jadi tidak boleh menghambat kerja
+   * kalau tebakannya meleset — cukup dipastikan sekali, lalu lanjut.
+   */
+  kirimKonfirmasi: function (close, btn, abaikanSn, alasan, keTeknisi) {
+    var P = App.pages.queue;
+    var h = P.d.header;
+
+    var kerja = [];
+    document.querySelectorAll('.gd-kerja-cek').forEach(function (c) {
+      if (c.checked) kerja.push(c.value);
+    });
+
+    var muatan = {
+      trx_id: h.trx_id, revision: h.revision, sn: P.lokal, idem: uid(),
+      petugas: P.petugasKode || '',
+      abaikan_sn: !!abaikanSn, alasan_sn: alasan || '',
+
+      // Hanya terkirim dari layar Eksekusi; di Gudang kotaknya
+      // tidak pernah digambar
+      kerja_teknisi: document.querySelector('.gd-kerja-cek')
+        ? kerja.join(', ') : undefined,
+
+      // Jalur pintas: langsung ke Teknisi, nota menyusul
+      ke_teknisi: !!keTeknisi,
+
+      catatan_teknisi: (document.getElementById('gd-cattek') || {}).value || ''
+    };
+
+    /*
+     * Penyimpanan berjalan di belakang, Gudang tidak menunggu.
+     *
+     * Dengan satu komputer, menunggu enam detik tiap konfirmasi berarti
+     * Sales yang antre ikut menunggu berlipat-lipat. Lima permintaan
+     * bersamaan jadi setengah menit hanya untuk menatap layar.
+     *
+     * Yang sudah dikerjakan Gudang tidak berubah kalau ditunggu atau
+     * tidak — barangnya sudah di meja, SN-nya sudah diketik. Jadi layar
+     * langsung kembali ke antrian dan pesanan berikutnya bisa dibuka,
+     * sementara penyimpanannya diselesaikan di belakang.
+     *
+     * Kalau gagal, pemberitahuannya BUKAN toast yang lewat begitu saja,
+     * melainkan kotak merah yang harus ditutup — supaya tidak ada yang
+     * lolos tanpa disadari.
+     */
+    close();
+    P.hapusDraft(h.trx_id);
+    toast(h.trx_no + ' sedang disimpan…', 'ok', 'Lanjut ke pesanan berikutnya');
+    App.kembali('queue');
+
+    api('apiConfirmWarehouse', muatan).then(function (r) {
+      toast(r.trx_no + ' diteruskan ke Admin' +
+        (r.sn_tersimpan ? ' · ' + r.sn_tersimpan + ' SN tersimpan' : '') + '.',
+        'ok', '✓ Barang siap');
+      if (App.state.page === 'queue' && App.pages.queue.load) App.pages.queue.load();
+    }).catch(function (e) {
+      Bunyi.salah();
+
+      /*
+       * Peringatan barang ber-SN yang dikosongkan bukan kegagalan —
+       * cuma perlu dipastikan sekali. Pesanannya dibuka lagi supaya
+       * Gudang bisa menjawab di layar yang sama, bukan di kotak
+       * peringatan yang kehilangan konteksnya.
+       */
+      if (e.code === 'SN_WARNING' && e.details) {
+        toast(h.trx_no + ' perlu dipastikan dulu.', 'err', '⚠ Ada SN yang kosong');
+        App.go('queue', h.trx_id);
+        setTimeout(function () {
+          Modal.open({
+            title: 'Barang ini biasanya punya Serial Number',
+            sub: 'Kalau memang barangnya tanpa SN, lanjutkan saja. Pilihan Anda dicatat.',
+            okText: 'Ya, barang ini tanpa SN',
+            cancelText: 'Isi SN dulu',
+            body:
+              e.details.map(function (d) {
+                return '<div style="padding:8px 0;border-bottom:1px solid var(--line)">' +
+                  '<b>' + Fmt.esc(d.product_name) + '</b> ' +
+                  '<span class="badge danger">' + d.terisi + ' / ' + d.qty + '</span>' +
+                  '<div class="small muted">' + Fmt.esc(d.alasan) + '</div></div>';
+              }).join('') +
+              '<div class="field mt16 mb0"><label>Keterangan</label>' +
+              '<input type="text" id="gd-alasansn" ' +
+              'placeholder="contoh: unit ini memang tanpa SN"></div>',
+            onOk: function (close2, btn2) {
+              btnBusy(btn2, true, 'Menyimpan');
+              var el = document.getElementById('gd-alasansn');
+              App.pages.queue.kirimKonfirmasi(close2, btn2, true,
+                el ? el.value : '', keTeknisi);
+            }
+          });
+        }, 1200);
+        return;
+      }
+
+      Modal.open({
+        title: '⚠ ' + h.trx_no + ' GAGAL disimpan',
+        sub: 'Pesanan ini BELUM diteruskan ke Admin. Buka lagi dan ulangi ' +
+             'konfirmasinya — serial number yang sudah diketik masih tersimpan ' +
+             'di perangkat ini.',
+        okText: 'Buka pesanannya', cancelText: 'Nanti saja',
+        body: '<div style="background:var(--danger-soft);color:var(--danger);' +
+          'padding:11px 13px;border-radius:9px"><b>' + Fmt.esc(e.message) + '</b></div>' +
+          '<div class="between mt16"><span class="muted">Customer</span><b>' +
+          Fmt.esc(h.cust_name) + '</b></div>',
+        onOk: function (tutup) { tutup(); App.go('queue', h.trx_id); }
+      });
+    });
+
+    return;
+  },
+
+  kirimKonfirmasiLama: function (close, btn, abaikanSn, alasan) {
+    var P = App.pages.queue;
+    var h = P.d.header;
+
+    api('apiConfirmWarehouse', {
+      trx_id: h.trx_id, revision: h.revision, sn: P.lokal, idem: uid(),
+      petugas: P.petugasKode || '',
+      abaikan_sn: !!abaikanSn, alasan_sn: alasan || ''
+    }).then(function (r) {
+      close();
+      P.hapusDraft(h.trx_id);
+      toast(r.trx_no + ' diteruskan ke Admin.', 'ok', 'Barang siap');
+      App.kembali('queue');
+    }).catch(function (e) {
+      btnBusy(btn, false, 'Ya, barang siap');
+
+      // Ada barang bertanda SN yang dikosongkan — dipastikan sekali, lalu lanjut
+      if (e.code === 'SN_WARNING' && e.details) {
+        close();
+        Modal.open({
+          title: 'Barang ini biasanya punya Serial Number',
+          sub: 'Kalau memang barangnya tanpa SN, lanjutkan saja. Pilihan Anda dicatat.',
+          okText: 'Ya, barang ini tanpa SN',
+          cancelText: 'Isi SN dulu',
+          body:
+            e.details.map(function (d) {
+              return '<div style="padding:8px 0;border-bottom:1px solid var(--line)">' +
+                '<b>' + Fmt.esc(d.product_name) + '</b> ' +
+                '<span class="badge danger">' + d.terisi + ' / ' + d.qty + '</span>' +
+                '<div class="small muted">' + Fmt.esc(d.alasan) + '</div></div>';
+            }).join('') +
+            '<div class="field mt16 mb0"><label>Keterangan</label>' +
+            '<input type="text" id="gd-alasansn" placeholder="contoh: unit ini memang tanpa SN"></div>',
+          onOk: function (close2, btn2) {
+            btnBusy(btn2, true, 'Menyimpan');
+            var el = document.getElementById('gd-alasansn');
+            P.kirimKonfirmasi(close2, btn2, true, el ? el.value : '');
+          }
+        });
+        return;
+      }
+
+      Bunyi.salah();
+      toast(e.message, 'err');
+
+      // SN bentrok dengan transaksi lain — kotaknya ditandai
+      if (e.details && e.details.length && e.details[0].seq !== undefined) {
+        close();
+        e.details.forEach(function (m) {
+          var el = document.querySelector('.gd-sn[data-item="' + m.item_id +
+                   '"][data-seq="' + m.seq + '"]');
+          if (el) {
+            el.style.borderColor = 'var(--danger)';
+            el.style.background = 'var(--danger-soft)';
+          }
+        });
+        var pertama = document.querySelector('.gd-sn[data-item="' + e.details[0].item_id +
+                      '"][data-seq="' + e.details[0].seq + '"]');
+        if (pertama) { pertama.focus(); pertama.select(); }
+      }
+    });
+  }
+};
+
+/* ============================================================
+   SUDAH DISIAPKAN
+   ============================================================ */
+App.pages.done = {
+  title: 'Sudah Disiapkan',
+
+  /*
+   * Membuka pesanan lama untuk dilihat, bukan dikerjakan.
+   *
+   * Ditandai dulu supaya layar antrian tahu harus membuka dalam
+   * bentuk baca saja, lalu berpindah seperti biasa — tidak menyuntik
+   * isi halaman sendiri, karena itu melewati jalur yang dipakai
+   * semua perpindahan lain.
+   */
+  lihat: function (trxId, asal) {
+    App.pages.queue.bacaSaja = trxId;
+    App.bukaDari('queue', trxId, asal || 'done');
+  },
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        /*
+         * Dua cara melihat: apa yang sudah dikerjakan, dan apa yang
+         * belum tuntas. Yang kedua dipakai untuk memantau — tanpa
+         * itu, begitu pesanan lewat dari meja, hilang dari pandangan
+         * sampai ada yang bertanya.
+         */
+        '<div class="inline chips" id="dn-mode">' +
+          '<button class="btn sm" data-m="selesai">Sudah disiapkan</button>' +
+          '<button class="btn sm ghost" data-m="berjalan">Masih berjalan</button>' +
+        '</div>' +
+        '<p class="hint mt8 mb0" id="dn-ket">Pesanan yang sudah Anda selesaikan.</p>' +
+
+        '<input type="text" id="dn-q" class="mt16" ' +
+          'placeholder="Cari nomor, customer, penyiap, driver, atau nota…">' +
+
+        '<div class="sep"></div>' +
+        '<div class="inline" style="gap:8px">' +
+          '<input type="date" id="dn-dari" title="Dari tanggal" ' +
+            'style="flex:1 1 130px;min-width:0">' +
+          '<input type="date" id="dn-sampai" title="Sampai tanggal" ' +
+            'style="flex:1 1 130px;min-width:0">' +
+          '<button class="btn sm" id="dn-cari">Tampilkan</button>' +
+          '<button class="btn sm ghost" id="dn-reset">Hapus</button>' +
+          '<button class="btn sm ghost" id="dn-all">Semua</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt16" id="dn-list"><div class="empty"><b>Memuat<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div></div>';
+  },
+
+  mount: function () {
+    var semua = false;
+    var mode = 'selesai';
+
+    var muat = function () {
+      var q = (document.getElementById('dn-q') || {}).value || '';
+      var dari = (document.getElementById('dn-dari') || {}).value || '';
+      var sampai = (document.getElementById('dn-sampai') || {}).value || '';
+
+      api('apiGudangDone', {
+        semua: semua || mode === 'berjalan' || !!(q || dari || sampai),
+        mode: mode, q: q, dari: dari, sampai: sampai
+      }).then(function (rows) {
+        if (!rows.length) {
+          document.getElementById('dn-list').innerHTML =
+            '<div class="empty"><b>Belum ada</b>Pesanan yang sudah dikonfirmasi siap akan muncul di sini.</div>';
+          return;
+        }
+        document.getElementById('dn-list').innerHTML =
+          /*
+           * Kolom penanganan: siapa yang memegang di tiap tahap.
+           *
+           * Pertanyaan yang datang beberapa hari kemudian biasanya
+           * bukan "pesanannya apa", tapi "waktu itu siapa yang
+           * menyiapkan" dan "dikirim lewat siapa".
+           */
+          '<div class="table-wrap"><table><thead><tr>' +
+            '<th>Nomor</th><th>Customer</th>' +
+            '<th class="kol-opsional">Penanganan</th>' +
+            '<th class="kol-opsional">Selesai disiapkan</th><th>Status sekarang</th>' +
+            '<th style="width:150px"></th>' +
+          '</tr></thead><tbody>' +
+          rows.map(function (t) {
+            return '<tr class="row-mark ' + Fmt.rowMark(t.stage_status) + '">' +
+              '<td><b class="mono small">' + Fmt.esc(t.trx_no) + '</b>' +
+                '<div class="small muted">' + t.item_count + ' item · ' +
+                  Fmt.rp(t.grand_total) + '</div>' +
+                (t.nota_no ? '<div class="small muted">' + Fmt.esc(t.nota_no) + '</div>' : '') +
+                (String(t.channel) === 'ONLINE'
+                  ? '<span class="badge brand">🌐 Online</span>' : '') + '</td>' +
+
+              '<td>' + Fmt.esc(t.cust_name) +
+                '<div class="small muted">Sales ' + Fmt.esc(t.sales_name || '—') + '</div></td>' +
+
+              '<td class="small kol-opsional">' +
+                (t.penyiap ? '<div>📦 ' + Fmt.esc(t.penyiap) + '</div>' : '') +
+                (t.teknisi ? '<div>🔧 ' + Fmt.esc(t.teknisi) + '</div>' : '') +
+                (t.kerja_teknisi
+                  ? '<div class="muted">' + Fmt.esc(t.kerja_teknisi) + '</div>' : '') +
+                (t.driver ? '<div>🛵 ' + Fmt.esc(t.driver) + '</div>' : '') +
+                (t.resi ? '<div class="mono muted">' + Fmt.esc(t.resi) + '</div>' : '') +
+                (t.metode_serah && !t.driver && !t.resi
+                  ? '<div class="muted">' + Fmt.esc(t.metode_serah) + '</div>' : '') +
+              '</td>' +
+
+              '<td class="small kol-opsional">' +
+                Fmt.esc(t.gudang_confirm_at ? Fmt.jam(t.gudang_confirm_at) : (t.tanggal || '—')) +
+              '</td>' +
+
+              '<td>' + Fmt.stageBadge(t.stage_status, t.stage_label) +
+                '<div class="mt8">' + Fmt.payBadge(t.payment_status) + '</div>' +
+                (t.tempo_jatuh
+                  ? '<div class="small" style="color:var(--warn)">Tempo · jatuh ' +
+                    Fmt.esc(t.tempo_jatuh) + '</div>' : '') +
+                (t.outstanding > 0 && !t.tempo_jatuh
+                  ? '<div class="small muted">Sisa ' + Fmt.rp(t.outstanding) + '</div>' : '') +
+              '</td>' +
+              '<td><div class="inline" style="flex-wrap:nowrap">' +
+                '<button class="btn sm ghost dn-buka" data-id="' + Fmt.esc(t.trx_id) +
+                  '">Buka</button>' +
+                (App.can('SN_INPUT')
+                  ? '<button class="btn sm ghost dn-sn" data-id="' + Fmt.esc(t.trx_id) +
+                    '" data-no="' + Fmt.esc(t.trx_no) + '">Koreksi SN</button>' : '') +
+              '</div></td>' +
+            '</tr>';
+          }).join('') + '</tbody></table></div>';
+
+        document.querySelectorAll('.dn-buka').forEach(function (b) {
+          b.onclick = function () {
+            // Dibuka untuk dilihat; tahapnya sudah lewat Gudang
+            App.pages.done.lihat(b.dataset.id, 'done');
+          };
+        });
+
+        /*
+         * Gudang tetap bisa membetulkan SN setelah konfirmasi.
+         *
+         * Salah ketik SN baru ketahuan belakangan — biasanya saat Admin
+         * atau Teknisi memeriksa. Kalau Gudang tidak bisa membetulkan
+         * sendiri, koreksinya menumpuk di Admin, dan yang paling tahu
+         * barangnya justru tidak bisa turun tangan.
+         */
+        document.querySelectorAll('.dn-sn').forEach(function (b) {
+          b.onclick = function () { App.pages.done.koreksiSn(b.dataset.id, b.dataset.no); };
+        });
+      }).catch(function (e) {
+        document.getElementById('dn-list').innerHTML =
+          '<div class="empty"><b>Data tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+      });
+    };
+
+    App.pages.done.muat = muat;
+    App.pages.done.load = muat;      // nama baku, dipakai penyegaran otomatis
+
+    document.getElementById('dn-mode').onclick = function (e) {
+      var b = e.target.closest('button[data-m]');
+      if (!b) return;
+
+      mode = b.dataset.m;
+      document.querySelectorAll('#dn-mode button').forEach(function (x) {
+        x.className = 'btn sm' + (x.dataset.m === mode ? '' : ' ghost');
+      });
+
+      var ket = document.getElementById('dn-ket');
+      if (ket) {
+        ket.textContent = mode === 'berjalan'
+          ? 'Pesanan yang belum tuntas — menunggu bayar, menunggu barang ' +
+            'datang, atau belum diserahkan.'
+          : 'Pesanan yang sudah Anda selesaikan.';
+      }
+
+      muat();
+    };
+
+    document.getElementById('dn-q').oninput = debounce(muat, 300);
+    document.getElementById('dn-cari').onclick = muat;
+    document.getElementById('dn-reset').onclick = function () {
+      document.getElementById('dn-q').value = '';
+      document.getElementById('dn-dari').value = '';
+      document.getElementById('dn-sampai').value = '';
+      semua = false;
+      muat();
+    };
+
+    document.getElementById('dn-all').onclick = function () {
+      semua = !semua;
+      this.textContent = semua ? 'Hari ini saja' : 'Tampilkan semua';
+      muat();
+    };
+    muat();
+  },
+
+  /** Membuka daftar barang transaksi itu, lalu memilih mana yang dikoreksi */
+  koreksiSn: function (trxId, trxNo) {
+    api('apiEtcData', { trx_id: trxId }).then(function (d) {
+      var daftar = d.items;
+      if (!daftar.length) return toast('Transaksi ini tidak punya barang.', 'err');
+
+      Modal.open({
+        title: 'Koreksi SN ' + trxNo,
+        sub: 'Pilih barang yang serial numbernya perlu dibetulkan.',
+        okText: 'Tutup', cancel: false,
+        body: daftar.map(function (i, n) {
+          var adaSn = i.sns && i.sns.length;
+          return '<div class="between" style="padding:9px 0;border-bottom:1px solid var(--line)">' +
+            '<div style="flex:1;min-width:160px">' +
+              '<b>' + Fmt.esc(i.product_name) + '</b>' +
+              '<div class="small muted">' + i.qty + ' unit · ' +
+                (adaSn ? Fmt.esc(i.sns.join(', ')) : 'belum ada SN') + '</div>' +
+            '</div>' +
+            '<button class="btn sm ghost dn-snitem" data-n="' + n + '">' +
+              (adaSn ? 'Koreksi' : 'Isi') + '</button></div>';
+        }).join(''),
+        onMount: function () {
+          document.querySelectorAll('.dn-snitem').forEach(function (b) {
+            b.onclick = function () {
+              var i = daftar[Number(b.dataset.n)];
+              App.pages.done.formSn(trxId, i);
+            };
+          });
+        }
+      });
+    }).catch(function (e) { toast(e.message, 'err'); });
+  },
+
+  formSn: function (trxId, i) {
+    var kotak = '';
+    for (var u = 0; u < i.qty; u++) {
+      kotak += '<div style="display:flex;align-items:center;gap:9px;margin-bottom:7px">' +
+        '<span class="small muted" style="width:52px;flex-shrink:0">Unit ' + (u + 1) + '</span>' +
+        '<input type="text" class="dn-snbox mono" data-seq="' + u + '" value="' +
+          Fmt.esc((i.sns && i.sns[u]) || '') + '" placeholder="kosongkan kalau tidak ada"></div>';
+    }
+
+    Modal.open({
+      title: 'Serial Number ' + i.product_name,
+      sub: 'SN lama tidak dihapus, hanya dinonaktifkan beserta alasannya. ' +
+           'Riwayatnya tetap bisa ditelusuri.',
+      okText: 'Simpan koreksi',
+      body: kotak +
+        '<div class="field mt16 mb0"><label>Alasan koreksi</label>' +
+        '<input type="text" id="dn-snreason" placeholder="contoh: salah ketik satu angka"></div>',
+      onOk: function (close, btn) {
+        var sns = [];
+        document.querySelectorAll('.dn-snbox').forEach(function (k) {
+          sns[Number(k.dataset.seq)] = k.value.trim().toUpperCase();
+        });
+        var alasan = document.getElementById('dn-snreason').value.trim();
+        if (alasan.length < 4) return toast('Alasan koreksi wajib diisi.', 'err');
+
+        btnBusy(btn, true);
+        api('apiKoreksiSn', {
+          trx_id: trxId, item_id: i.item_id, sns: sns, reason: alasan
+        }).then(function () {
+          close();
+          toast('Serial Number diperbarui.', 'ok');
+          if (App.pages.done.muat) App.pages.done.muat();
+        }).catch(function (e) {
+          btnBusy(btn, false, 'Simpan koreksi');
+          toast(e.message, 'err');
+        });
+      }
+    });
+  }
+};
+
+/* ============================================================
+   LACAK BARANG KELUAR
+   ============================================================ */
+App.pages.lacak = {
+  title: 'Lacak Barang Keluar',
+  hari: 30,
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<h3>Cari barang yang sudah keluar gudang</h3>' +
+        '<p class="hint">Bisa dicari lewat serial number, kode barang, nama barang, ' +
+          'nomor transaksi, nama customer, atau nama sales. ' +
+          'Serial number yang pernah ditarik kembali juga ikut ketemu — ' +
+          'ditampilkan dicoret beserta alasannya.</p>' +
+        '<input type="text" id="lc-q" placeholder="Contoh: SN123456 atau DEMO-LPT001" autocomplete="off">' +
+        '<div class="inline mt16" id="lc-hari">' +
+          '<button class="btn sm ghost" data-h="7">7 hari</button>' +
+          '<button class="btn sm" data-h="30">30 hari</button>' +
+          '<button class="btn sm ghost" data-h="90">90 hari</button>' +
+          '<button class="btn sm ghost" data-h="0">Semua</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt16" id="lc-list"><div class="empty"><b>Memuat<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.lacak;
+
+    document.getElementById('lc-hari').onclick = function (e) {
+      var b = e.target.closest('button[data-h]'); if (!b) return;
+      P.hari = Number(b.dataset.h);
+      document.querySelectorAll('#lc-hari button').forEach(function (x) {
+        x.classList.toggle('ghost', x.dataset.h !== b.dataset.h);
+      });
+      P.load();
+    };
+
+    document.getElementById('lc-q').oninput = debounce(function () { P.load(); }, 320);
+    document.getElementById('lc-q').onkeydown = function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); P.load(); }
+    };
+    P.load();
+  },
+
+  load: function () {
+    var P = App.pages.lacak;
+    var q = document.getElementById('lc-q').value.trim();
+
+    document.getElementById('lc-list').innerHTML =
+      '<div class="empty"><span class="spin" style="border-color:#ccc;border-top-color:#666"></span> Mencari…</div>';
+
+    api('apiItemHistory', { q: q, hari: P.hari }).then(function (d) {
+      if (!d.list.length) {
+        document.getElementById('lc-list').innerHTML =
+          '<div class="empty"><b>Tidak ditemukan</b>' +
+          (q ? 'Coba kata kunci lain, atau perluas rentang waktunya.'
+             : 'Belum ada barang yang keluar pada rentang waktu ini.') + '</div>';
+        return;
+      }
+
+      document.getElementById('lc-list').innerHTML =
+        '<div class="card mb0" style="border-radius:14px 14px 0 0;border-bottom:0">' +
+          '<div class="between"><b>' + d.total + ' baris barang · ' + d.totalUnit + ' unit</b>' +
+          (d.dipotong ? '<span class="badge warn">Ditampilkan 200 teratas</span>' : '') + '</div></div>' +
+        '<div class="table-wrap" style="border-radius:0 0 14px 14px"><table><thead><tr>' +
+          '<th>Barang</th><th>Serial Number</th><th>Transaksi</th><th>Keluar</th>' +
+        '</tr></thead><tbody>' +
+        d.list.map(function (r) {
+          return '<tr class="row-mark ' + Fmt.rowMark(r.stage_status) + '">' +
+            '<td><b>' + Fmt.esc(r.product_name) + '</b>' +
+              (r.source === 'MANUAL' ? ' <span class="badge warn">Manual</span>' : '') +
+              '<div class="small muted">' + Fmt.esc(r.product_code) + ' · ' + r.qty + ' unit</div></td>' +
+            /*
+             * SN yang ditarik ikut ditampilkan, dicoret dan diberi
+             * keterangan. Unit yang pernah keluar lalu kembali harus
+             * tetap bisa ditelusuri — kalau tidak, Admin stok tidak
+             * punya cara membedakannya dari barang yang tidak pernah
+             * bergerak.
+             */
+            '<td class="small mono">' +
+              (r.sns.length ? r.sns.map(Fmt.esc).join('<br>') : '<span class="muted">—</span>') +
+              /*
+               * Kejadian ganti unit ditampilkan sebagai cerita, bukan
+               * sekadar SN yang dicoret. Ini yang paling sering
+               * ditanyakan saat menelusuri unit bermasalah.
+               */
+              ((r.ganti && r.ganti.length)
+                ? '<div style="margin-top:7px;padding:7px 9px;border-radius:7px;' +
+                  'background:var(--warn-soft)">' +
+                  r.ganti.map(function (g) {
+                    return '<div style="font-size:11px;color:var(--warn);line-height:1.5">' +
+                      '<b>⚠ Unit ' + g.unit + ' diganti</b>' +
+                      (g.keluhan ? '<div>' + Fmt.esc(g.keluhan) + '</div>' : '') +
+                      (g.sn_lama ? '<div>rusak: ' + Fmt.esc(g.sn_lama) + '</div>' : '') +
+                      (g.sn_baru ? '<div>ganti: ' + Fmt.esc(g.sn_baru) + '</div>' : '') +
+                      (g.nota_ganti ? '<div>nota ' + Fmt.esc(g.nota_ganti) + '</div>' : '') +
+                      '</div>';
+                  }).join('') + '</div>'
+                : '') +
+
+              ((r.sns_ditarik && r.sns_ditarik.length)
+                ? '<div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)">' +
+                  r.sns_ditarik.map(function (x) {
+                    return '<div style="color:var(--muted)">' +
+                      '<span style="text-decoration:line-through">' + Fmt.esc(x.sn) + '</span>' +
+                      '<div style="font-size:11px">ditarik' +
+                        (x.alasan ? ' · ' + Fmt.esc(x.alasan.substring(0, 40)) : '') +
+                      '</div></div>';
+                  }).join('') + '</div>'
+                : '') +
+            '</td>' +
+            '<td><b class="mono">' + Fmt.esc(r.trx_no) + '</b>' +
+              '<div class="small muted">' + Fmt.esc(r.cust_name) + '</div>' +
+              '<div class="small muted">Sales ' + Fmt.esc(r.sales_name || '—') +
+              (r.nota_no ? ' · Nota ' + Fmt.esc(r.nota_no) : '') + '</div>' +
+              '<div class="small mt8">' + Fmt.stageBadge(r.stage_status, r.stage_label) + ' ' +
+              Fmt.payBadge(r.payment_status) + '</div></td>' +
+            '<td class="small">' + Fmt.esc(Fmt.jam(r.keluar_at)) +
+              (r.prepared_by ? '<div class="small muted">oleh ' + Fmt.esc(r.prepared_by) + '</div>' : '') +
+              '</td>' +
+          '</tr>';
+        }).join('') + '</tbody></table></div>';
+    }).catch(function (e) {
+      document.getElementById('lc-list').innerHTML =
+        '<div class="empty"><b>Pencarian gagal</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  }
+};
+
+/* ============================================================
+   PENGAWAS PESANAN BARU
+
+   Berjalan di tingkat aplikasi, bukan menempel pada satu halaman.
+   Selama masih login sebagai Gudang, pesanan baru tetap terdeteksi
+   walau sedang membuka menu Beranda, Lacak Barang, atau menu lain.
+
+   Catatan jujur: kalau tab aplikasi ditinggalkan ke tab lain,
+   browser memperlambat pengecekan berkala jadi sekitar sekali per
+   menit demi menghemat baterai. Bunyinya tetap keluar, hanya bisa
+   telat. Itu perilaku bawaan browser, bukan sesuatu yang bisa
+   dimatikan dari kode.
+   ============================================================ */
+var GudangWatch = {
+  timer: null,
+  pulse: -1,
+  baru: 0,
+  jalan: false,
+
+  perluAwasi: function () {
+    /*
+     * Tim Eksekusi ikut diawasi.
+     *
+     * Pesanan online masuk kapan saja dan orangnya sedang menyiapkan
+     * barang di rak, bukan menatap layar. Alarm itulah satu-satunya
+     * yang memberi tahu — sama persis alasannya seperti Gudang.
+     */
+    var s = App.state.session;
+    if (!s) return false;
+    return ['GUDANG', 'EKSEKUSI', 'SUPERADMIN'].indexOf(s.role) >= 0;
+  },
+
+  /**
+   * Dipanggil oleh NotifCenter setiap ada perubahan.
+   * Tidak punya pengecek sendiri — kalau tiap bagian mengecek terpisah,
+   * kuota Apps Script habis berkali lipat.
+   */
+  terakhirBaca: 0,
+
+  segarkan: function () {
+    if (!GudangWatch.perluAwasi()) {
+      if (GudangWatch.jalan) { GudangWatch.jalan = false; Alarm.perbarui(0); }
+      GudangWatch.tombolSuara(false);
+      return;
+    }
+    GudangWatch.jalan = true;
+    GudangWatch.tombolSuara(!Bunyi.aktif);
+
+    var pertamaKali = GudangWatch.pulse === -1;
+    GudangWatch.pulse = 1;
+
+    // Antrian tidak dibaca ulang lebih rapat dari 10 detik. Saat pesanan
+    // datang beruntun, membaca ulang tiap kali justru memperlambat semua
+    // orang — termasuk yang sedang menyimpan data.
+    var now = Date.now();
+    if (!pertamaKali && now - GudangWatch.terakhirBaca < 10000) return;
+    GudangWatch.terakhirBaca = now;
+
+
+    api('apiGudangQueue', {}).then(function (q) {
+      var naikBaru = q.baru > GudangWatch.baru;
+      var naikRevisi = (q.revisi || 0) > (GudangWatch.revisi || 0);
+      GudangWatch.baru = q.baru;
+      GudangWatch.revisi = q.revisi || 0;
+      var naikGanti = (q.ganti || 0) > (GudangWatch.ganti || 0);
+      GudangWatch.ganti = q.ganti || 0;
+
+      /*
+       * Angka di samping menu diambil LANGSUNG dari antrian ini.
+       *
+       * Sebelumnya badge dihitung terpisah di server. Hasilnya dua angka
+       * yang seharusnya sama tapi bisa berbeda — dan yang salah justru
+       * yang terlihat di menu, sementara isi layarnya sudah benar.
+       *
+       * Sekarang keduanya berasal dari satu jawaban yang sama, jadi
+       * tidak mungkin berselisih lagi.
+       */
+      if (window.NotifCenter) {
+        NotifCenter.kerja = NotifCenter.kerja || {};
+        NotifCenter.kerja.queue = (q.baru || 0) + (q.proses || 0) + (q.revisi || 0);
+        NotifCenter.kerja.ganti = q.ganti || 0;
+
+        // Penanda untuk menu Menunggu Barang dan Siap Diserahkan
+        NotifCenter.kerja.indent = q.indent || 0;
+        NotifCenter.kerja.serah = q.serah || 0;
+        NotifCenter.gambarBadge();
+      }
+
+      if ((naikBaru || naikRevisi || naikGanti) && !pertamaKali) Alarm.tundaSampai = 0;
+      /*
+       * Kalimat alarmnya menyesuaikan isi antrian.
+       *
+       * "Ada pesanan baru" keliru kalau yang masuk sebenarnya
+       * permintaan barang dari Eksekusi, atau kabar bahwa barang
+       * dari Gudang sudah siap. Orang yang mendengarnya datang ke
+       * layar dengan harapan yang salah.
+       */
+      var alarmQ = q.alarm || {};
+      var adaMinta = (q.list || []).some(function (t) { return t.hanya_sn && t.minta_sn; });
+      var adaSiap = (q.list || []).some(function (t) { return t.sn_siap; });
+      var adaDraft = (q.draft || 0) > 0;
+
+      if (adaMinta || adaSiap || adaDraft) {
+        alarmQ = {
+          ulangDetik: alarmQ.ulangDetik, tundaMenit: alarmQ.tundaMenit,
+          ulangUcapan: alarmQ.ulangUcapan, pakaiSuara: alarmQ.pakaiSuara,
+          kalimatRevisi: alarmQ.kalimatRevisi,
+          kalimat: adaMinta
+            ? 'Ada permintaan barang dari tim eksekusi'
+            : (adaSiap
+               ? 'Barang dari gudang sudah siap diambil'
+               : 'Ada pesanan draft dari sales online')
+        };
+      }
+
+      Alarm.perbarui(q.baru, alarmQ, (q.revisi || 0) + (q.ganti || 0));
+
+      if (naikGanti && !pertamaKali) {
+        toast('Teknisi minta ganti unit rusak. Buka menu Ganti Unit.', 'err',
+              '⚠ Minta ganti unit');
+      }
+
+      /*
+       * Permintaan barang dari Tim Eksekusi juga berbunyi.
+       *
+       * Orang Gudang sedang di rak, bukan menatap layar — sama
+       * seperti pesanan baru. Catatannya ikut dibacakan supaya
+       * tidak perlu kembali ke meja hanya untuk tahu isinya.
+       */
+      var jmlMinta = 0, catatanMinta = '';
+      (q.list || []).forEach(function (t) {
+        if (!t.hanya_sn || !t.minta_sn_detail) return;
+        jmlMinta++;
+        if (!catatanMinta) catatanMinta = String(t.minta_sn_detail.catatan || '');
+      });
+
+      var naikMinta = jmlMinta > (GudangWatch.minta || 0);
+      GudangWatch.minta = jmlMinta;
+
+      if (naikMinta && !pertamaKali) {
+        Alarm.tundaSampai = 0;
+        toast('Tim Eksekusi minta barang disiapkan.' +
+              (catatanMinta ? ' Catatan: ' + catatanMinta : ''),
+              'err', '📦 Permintaan dari Eksekusi');
+
+        try {
+          Bunyi.nada(880, 0.16);
+          setTimeout(function () { Bunyi.nada(1180, 0.2); }, 200);
+          setTimeout(function () {
+            Bunyi.bicara('Permintaan barang dari tim eksekusi' +
+              (catatanMinta ? '. ' + catatanMinta : ''));
+          }, 700);
+        } catch (eS) {}
+      }
+
+      /*
+       * Dari sisi Eksekusi: bunyi saat Gudang selesai menyiapkan.
+       *
+       * Yang ditunggu Eksekusi bukan pesanan baru, melainkan kabar
+       * bahwa barangnya sudah bisa diambil. Tanpa ini dia harus
+       * menengok layar berulang kali.
+       */
+      if (App.state.session && App.state.session.role === 'EKSEKUSI') {
+        var jmlTunggu = 0;
+        (q.list || []).forEach(function (t) { if (t.minta_sn) jmlTunggu++; });
+
+        if (!pertamaKali && GudangWatch.tunggu !== undefined &&
+            jmlTunggu < GudangWatch.tunggu) {
+          toast('Barang sudah disiapkan Gudang, bisa diambil.', 'ok',
+                '✓ Dari Gudang');
+          try {
+            Bunyi.nada(1180, 0.14);
+            setTimeout(function () { Bunyi.nada(1480, 0.2); }, 180);
+            setTimeout(function () {
+              Bunyi.bicara('Barang dari gudang sudah siap diambil');
+            }, 650);
+          } catch (eS2) {}
+        }
+        GudangWatch.tunggu = jmlTunggu;
+      }
+
+      if (App.state.page === 'queue' && !App.state.param && document.getElementById('gd-list')) {
+        var P = App.pages.queue;
+        P.s = {
+          list: q.list, baru: q.baru, proses: q.proses, revisi: q.revisi,
+          tertahan: q.tertahan, pulse: q.pulse, stuckMin: q.stuckMin,
+          alarm: q.alarm, filter: P.s.filter
+        };
+        P.draw();
+      }
+    }).catch(function () {});
+  },
+
+  /** Tombol suara mengambang, muncul di menu mana pun selama suara belum aktif */
+  tombolSuara: function (tampil) {
+    var el = document.getElementById('gd-float-sound');
+
+    if (!tampil) { if (el) el.remove(); return; }
+    if (el) return;
+
+    el = document.createElement('button');
+    el.id = 'gd-float-sound';
+    el.className = 'btn';
+    el.innerHTML = '🔊 Aktifkan suara notifikasi';
+    el.style.cssText =
+      'position:fixed;left:18px;bottom:18px;z-index:150;box-shadow:0 6px 20px rgba(16,24,40,.22)';
+    el.onclick = function () {
+      if (Bunyi.nyalakan()) {
+        toast('Suara notifikasi aktif. Alarm akan berbunyi di menu mana pun.', 'ok');
+        el.remove();
+        if (GudangWatch.baru) Alarm.perbarui(GudangWatch.baru);
+        var tombolHalaman = document.getElementById('gd-sound');
+        if (tombolHalaman) {
+          tombolHalaman.textContent = '🔊 Suara aktif';
+          tombolHalaman.classList.remove('ghost');
+        }
+      } else {
+        toast('Browser ini tidak mendukung suara notifikasi.', 'err');
+      }
+    };
+    document.body.appendChild(el);
+  }
+};
+
+// Tombol suara tetap perlu dipasang walau belum ada perubahan apa pun
+setInterval(function () {
+  if (GudangWatch.perluAwasi()) GudangWatch.tombolSuara(!Bunyi.aktif);
+  else GudangWatch.tombolSuara(false);
+}, 5000);
+
+</script>

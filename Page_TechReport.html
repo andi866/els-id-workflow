@@ -1,0 +1,346 @@
+<script>
+/* ============================================================
+   CATAT PEKERJAAN
+
+   Untuk pekerjaan yang tidak menempel pada penjualan — upgrade RAM,
+   rakit PC, inkcharging. Yang dari penjualan tidak perlu dicatat di
+   sini; itu dihitung sendiri dari isi transaksi saat aktivasi
+   selesai, jadi tidak bisa lupa dan tidak bisa dilebihkan.
+   ============================================================ */
+App.pages.kerja = {
+  title: 'Catat Pekerjaan',
+  teknisi: [],
+  jenis: [],
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<h3>Catat pekerjaan</h3>' +
+        '<p class="hint">Hanya untuk yang tidak ada di pesanan. McAfee, Screen, ' +
+        'Skin, dan Office terhitung sendiri saat aktivasi diselesaikan.</p>' +
+
+        '<div class="grid c2">' +
+          '<div class="field mb0"><label>Teknisi</label>' +
+            '<select id="kj-tech"><option value="">— pilih nama —</option></select></div>' +
+          '<div class="field mb0"><label>Jenis pekerjaan</label>' +
+            '<select id="kj-jenis"></select></div>' +
+        '</div>' +
+
+        '<div class="grid c2 mt16">' +
+          '<div class="field mb0"><label>Jumlah</label>' +
+            '<input type="number" id="kj-jumlah" value="1" min="1" max="100"></div>' +
+          '<div class="field mb0"><label>Nomor transaksi (boleh dikosongkan)</label>' +
+            '<input type="text" id="kj-trx" placeholder="TRX-… atau nomor nota"></div>' +
+        '</div>' +
+
+        '<div class="field mt16 mb0"><label>Keterangan</label>' +
+          '<input type="text" id="kj-ket" placeholder="contoh: RAM 8GB ke 16GB">' +
+          '<div class="note" id="kj-note">Boleh dikosongkan.</div>' +
+        '</div>' +
+
+        '<button class="btn block lg mt16" id="kj-simpan">Catat pekerjaan</button>' +
+      '</div>' +
+
+      '<div class="card mt16">' +
+        '<div class="between">' +
+          '<h3 class="mb0">Dicatat hari ini</h3>' +
+          '<button class="btn sm ghost" id="kj-muat" title="Muat ulang">↻</button>' +
+        '</div>' +
+        '<div id="kj-list" class="mt16"></div>' +
+      '</div>';
+  },
+
+  mount: function () {
+    var P = App.pages.kerja;
+
+    api('apiTeknisiList', {}).then(function (d) {
+      P.teknisi = d.list;
+      var sel = document.getElementById('kj-tech');
+      if (!sel) return;
+      sel.innerHTML = '<option value="">— pilih nama —</option>' +
+        d.list.map(function (t) {
+          return '<option value="' + Fmt.esc(t.code) + '">' + Fmt.esc(t.name) + '</option>';
+        }).join('');
+
+      // Nama yang dipakai terakhir diingat, supaya tidak memilih
+      // berulang kali sepanjang hari
+      var ingat = Store.get('els_tech_terakhir');
+      if (ingat) sel.value = ingat;
+    }).catch(function (e) { toast(e.message, 'err'); });
+
+    api('apiJenisKerja', {}).then(function (d) {
+      P.jenis = d.list;
+      var sel = document.getElementById('kj-jenis');
+      if (!sel) return;
+      sel.innerHTML = d.list.map(function (j) {
+        return '<option value="' + Fmt.esc(j) + '">' + Fmt.esc(j) + '</option>';
+      }).join('') + '<option value="Pekerjaan lain">Pekerjaan lain…</option>';
+    }).catch(function (e) { toast(e.message, 'err'); });
+
+    /*
+     * Keterangan hanya wajib untuk "Pekerjaan lain".
+     *
+     * Jenis pekerjaannya sendiri sudah menjelaskan — "Upgrade RAM"
+     * tidak perlu diterangkan lagi. Catatannya berubah mengikuti
+     * pilihan supaya tidak ada yang mengisi karena merasa diharuskan.
+     */
+    var selJ = document.getElementById('kj-jenis');
+    var noteK = document.getElementById('kj-note');
+    var kotakK = document.getElementById('kj-ket');
+
+    var aturNote = function () {
+      var lain = selJ.value === 'Pekerjaan lain';
+      noteK.innerHTML = lain
+        ? '<b style="color:var(--danger)">Wajib diisi</b> — tulis pekerjaannya apa.'
+        : 'Boleh dikosongkan.';
+      kotakK.placeholder = lain
+        ? 'contoh: pasang CCTV di toko customer'
+        : 'contoh: RAM 8GB ke 16GB (boleh dikosongkan)';
+    };
+
+    selJ.onchange = aturNote;
+    setTimeout(aturNote, 400);
+
+    document.getElementById('kj-simpan').onclick = function () { P.simpan(this); };
+    document.getElementById('kj-muat').onclick = function () { P.load(); };
+    P.load();
+  },
+
+  simpan: function (btn) {
+    var P = App.pages.kerja;
+    var tech = document.getElementById('kj-tech').value;
+    var jenis = document.getElementById('kj-jenis').value;
+    var jumlah = Number(document.getElementById('kj-jumlah').value) || 1;
+    var ket = document.getElementById('kj-ket').value.trim();
+    var trx = document.getElementById('kj-trx').value.trim();
+
+    if (!tech) return toast('Pilih dulu nama teknisinya.', 'err');
+    if (jenis === 'Pekerjaan lain' && ket.length < 3) {
+      return toast('Tulis dulu pekerjaannya apa.', 'err');
+    }
+
+    Store.set('els_tech_terakhir', tech);
+
+    var muatan = {
+      tech_code: tech, jenis: jenis, jumlah: jumlah,
+      keterangan: ket, trx_no: trx, idem: uid()
+    };
+
+    /*
+     * Ditunggu sampai benar-benar tersimpan.
+     *
+     * Sebelumnya disimpan di latar belakang supaya layar langsung
+     * bisa dipakai. Tapi Teknisi melaporkan catatannya kadang tidak
+     * muncul — dan memang begitu kejadiannya: daftar dimuat ulang
+     * sebelum tulisannya sampai di server, atau penyimpanannya
+     * gagal diam-diam.
+     *
+     * Untuk catatan yang jadi dasar laporan bulanan, yang penting
+     * bukan cepatnya layar — melainkan orangnya tahu pasti sudah
+     * tercatat atau belum.
+     */
+    btnBusy(btn, true, 'Mencatat');
+
+    api('apiCatatKerja', muatan).then(function (r) {
+      btnBusy(btn, false, 'Catat pekerjaan');
+      toast(r.pesan, 'ok', '✓ Tercatat');
+
+      document.getElementById('kj-jumlah').value = 1;
+      document.getElementById('kj-ket').value = '';
+      document.getElementById('kj-trx').value = '';
+
+      P.load();
+    }).catch(function (e) {
+      btnBusy(btn, false, 'Catat pekerjaan');
+
+      /*
+       * Yang diketik TIDAK dihapus saat gagal.
+       *
+       * Menghapusnya berarti orangnya harus mengetik ulang semuanya
+       * hanya untuk mencoba sekali lagi.
+       */
+      toast('Belum tercatat: ' + e.message + (e.code ? '  [' + e.code + ']' : ''),
+            'err', 'Coba sekali lagi');
+    });
+  },
+
+  load: function () {
+    var wadah = document.getElementById('kj-list');
+    if (!wadah) return;
+
+    api('apiKerjaHariIni', {}).then(function (d) {
+      if (!d.list.length) {
+        wadah.innerHTML = '<div class="empty"><b>Belum ada catatan hari ini</b>' +
+          'Pekerjaan yang dicatat akan muncul di sini.</div>';
+        return;
+      }
+
+      wadah.innerHTML = '<div class="table-wrap"><table><thead><tr>' +
+        '<th>Jam</th><th>Teknisi</th><th>Pekerjaan</th>' +
+        '<th class="num">Jumlah</th><th style="width:60px"></th>' +
+        '</tr></thead><tbody>' +
+        d.list.map(function (r) {
+          return '<tr>' +
+            '<td class="small muted">' + Fmt.esc(Fmt.jam(r.jam)) + '</td>' +
+            '<td><b>' + Fmt.esc(r.tech_name) + '</b></td>' +
+            '<td>' + Fmt.esc(r.jenis) +
+              (r.keterangan ? '<div class="small muted">' +
+                Fmt.esc(r.keterangan) + '</div>' : '') + '</td>' +
+            '<td class="num">' + r.jumlah + '</td>' +
+            '<td><button class="btn sm ghost kj-del" data-id="' + Fmt.esc(r.work_id) +
+              '" style="color:var(--danger)">Hapus</button></td>' +
+          '</tr>';
+        }).join('') + '</tbody></table></div>';
+
+      document.querySelectorAll('.kj-del').forEach(function (b) {
+        b.onclick = function () {
+          Modal.confirm('Hapus catatan ini?',
+            'Dipakai kalau salah catat. Catatannya tidak hilang dari riwayat, ' +
+            'hanya tidak ikut dihitung di laporan.',
+            'Ya, hapus', function () {
+              b.closest('tr').style.opacity = '.4';
+              Latar.simpan('apiHapusKerja', { work_id: b.dataset.id, idem: uid() }, {
+                judul: 'Hapus catatan',
+                berhasil: function () {
+                  toast('Catatan dihapus.', 'ok');
+                  App.pages.kerja.load();
+                }
+              }).catch(function () { App.pages.kerja.load(); });
+            });
+        };
+      });
+    }).catch(function (e) {
+      wadah.innerHTML = '<div class="empty"><b>Gagal memuat</b>' +
+        Fmt.esc(e.message) + '</div>';
+    });
+  }
+};
+
+/* ============================================================
+   LAPORAN TEKNISI
+
+   Bentuknya mengikuti rekap bulanan yang selama ini dipakai: jumlah
+   per kategori, persentase kontribusi, dan KPI.
+
+   KPI = persentase pekerjaan orang itu dibagi bagian idealnya
+   (100% dibagi jumlah teknisi), dibatasi 100%. Delapan teknisi
+   berarti bagian idealnya 12,5% — yang mengerjakan segitu atau
+   lebih mendapat 100%.
+   ============================================================ */
+App.pages.lapteknisi = {
+  title: 'Laporan Teknisi',
+  bulan: '',
+
+  html: function () {
+    var skr = new Date();
+    var ini = skr.getFullYear() + '-' +
+      String(skr.getMonth() + 1).padStart(2, '0');
+    if (!App.pages.lapteknisi.bulan) App.pages.lapteknisi.bulan = ini;
+
+    return '' +
+      '<div class="card">' +
+        '<div class="between">' +
+          '<div><h3 class="mb0">Rekap pekerjaan teknisi</h3>' +
+          '<p class="hint mb0">McAfee, Screen, Skin, dan Office dihitung sendiri ' +
+          'dari pesanan. Sisanya dari yang dicatat manual.</p></div>' +
+          '<div class="inline">' +
+            '<input type="month" id="lt-bulan" value="' +
+              App.pages.lapteknisi.bulan + '" style="width:auto">' +
+            '<button class="btn sm" id="lt-muat">Tampilkan</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt16" id="lt-isi"><div class="empty"><b>Memuat<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.lapteknisi;
+    document.getElementById('lt-muat').onclick = function () {
+      P.bulan = document.getElementById('lt-bulan').value;
+      P.load();
+    };
+    P.load();
+  },
+
+  load: function () {
+    var P = App.pages.lapteknisi;
+    var wadah = document.getElementById('lt-isi');
+    if (!wadah) return;
+
+    api('apiLaporanTeknisi', { bulan: P.bulan }).then(function (d) {
+      if (!d.baris.length) {
+        wadah.innerHTML = '<div class="empty"><b>Belum ada data bulan ini</b>' +
+          'Pastikan Teknisi memilih namanya saat menekan Mulai aktivasi — ' +
+          'tanpa itu pekerjaannya tidak bisa dihitung per orang.</div>';
+        return;
+      }
+
+      var pct = function (n) { return (Math.round(n * 100) / 100).toFixed(2) + '%'; };
+
+      wadah.innerHTML =
+        '<div class="grid c3">' +
+          '<div class="stat"><b>' + d.total_semua + '</b>' +
+            '<span>Total pekerjaan</span></div>' +
+          '<div class="stat"><b>' + d.jumlah_teknisi + '</b>' +
+            '<span>Teknisi aktif bulan ini</span></div>' +
+          '<div class="stat"><b>' + pct(d.bagian_ideal) + '</b>' +
+            '<span>Bagian ideal per orang</span></div>' +
+        '</div>' +
+
+        /* Jumlah pekerjaan */
+        '<div class="card mt16"><h3>Jumlah pekerjaan</h3>' +
+          '<div class="table-wrap mt16"><table><thead><tr>' +
+            '<th>Teknisi</th>' +
+            d.kolom.map(function (k) {
+              return '<th class="num">' + Fmt.esc(k) + '</th>';
+            }).join('') +
+            '<th class="num">Total</th>' +
+          '</tr></thead><tbody>' +
+          d.baris.map(function (r) {
+            return '<tr><td><b>' + Fmt.esc(r.nama) + '</b></td>' +
+              d.kolom.map(function (k) {
+                return '<td class="num' + (r.isi[k] ? '' : ' muted') + '">' +
+                  (r.isi[k] || 0) + '</td>';
+              }).join('') +
+              '<td class="num"><b>' + r.total + '</b></td></tr>';
+          }).join('') +
+          '<tr style="background:var(--paper)"><td><b>Jumlah</b></td>' +
+            d.kolom.map(function (k) {
+              return '<td class="num"><b>' + (d.total_kolom[k] || 0) + '</b></td>';
+            }).join('') +
+            '<td class="num"><b>' + d.total_semua + '</b></td></tr>' +
+          '</tbody></table></div></div>' +
+
+        /* Persentase dan KPI */
+        '<div class="card mt16"><h3>Persentase pencapaian</h3>' +
+          '<p class="hint">KPI = bagian pekerjaan orang itu dibagi bagian idealnya ' +
+          '(' + pct(d.bagian_ideal) + '), dibatasi 100%.</p>' +
+          '<div class="table-wrap"><table><thead><tr>' +
+            '<th>Teknisi</th>' +
+            d.kolom.map(function (k) {
+              return '<th class="num">' + Fmt.esc(k) + '</th>';
+            }).join('') +
+            '<th class="num">Semua</th><th class="num">KPI</th><th class="num"></th>' +
+          '</tr></thead><tbody>' +
+          d.baris.map(function (r) {
+            var warna = r.kpi_nilai >= 100 ? 'var(--ok)'
+                      : (r.kpi_nilai >= 90 ? 'var(--warn)' : 'var(--danger)');
+            return '<tr><td><b>' + Fmt.esc(r.nama) + '</b></td>' +
+              d.kolom.map(function (k) {
+                return '<td class="num small' + (r.isi[k] ? '' : ' muted') + '">' +
+                  pct(r.persen[k]) + '</td>';
+              }).join('') +
+              '<td class="num small">' + pct(r.persen_all) + '</td>' +
+              '<td class="num small">' + pct(r.kpi) + '</td>' +
+              '<td class="num"><b style="color:' + warna + '">' +
+                r.kpi_nilai + '%</b></td></tr>';
+          }).join('') +
+          '</tbody></table></div></div>';
+
+    }).catch(function (e) {
+      wadah.innerHTML = '<div class="empty"><b>Gagal memuat</b>' +
+        Fmt.esc(e.message) + '</div>';
+    });
+  }
+};
+</script>

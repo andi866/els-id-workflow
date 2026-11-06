@@ -1,0 +1,1467 @@
+<script>
+/* ============================================================
+   ELS.ID WORKFLOW — JsCore v2
+   Perubahan dari v1:
+   - Menu terbuka sendiri begitu halamannya tersedia, jadi file ini
+     tidak perlu disentuh lagi pada phase-phase berikutnya.
+   - App.go() bisa membawa parameter (mis. membuka satu transaksi).
+   - Tambahan: debounce, parsing rupiah, badge status.
+   ============================================================ */
+
+var Store = (function () {
+  var mem = {};
+  var able = (function () {
+    try { localStorage.setItem('_t', '1'); localStorage.removeItem('_t'); return true; }
+    catch (e) { return false; }
+  })();
+  return {
+    get: function (k) { try { return able ? localStorage.getItem(k) : mem[k] || null; } catch (e) { return mem[k] || null; } },
+    set: function (k, v) { try { able ? localStorage.setItem(k, v) : mem[k] = v; } catch (e) { mem[k] = v; } },
+    del: function (k) { try { able ? localStorage.removeItem(k) : delete mem[k]; } catch (e) { delete mem[k]; } }
+  };
+})();
+
+/* ============================================================
+   Simpanan sementara di browser
+
+   Data transaksi yang sudah pernah dibuka disimpan di memori halaman.
+   Saat dibuka lagi, isinya digambar seketika, lalu disegarkan di
+   belakang tanpa menahan layar.
+
+   Yang dirasakan staf: menekan Buka langsung menampilkan isinya, bukan
+   tulisan "Memuat…" selama beberapa detik. Data yang sudah ada tidak
+   perlu diambil ulang dari nol hanya untuk ditampilkan lagi.
+
+   Semuanya dibuang begitu ada yang menyimpan perubahan, jadi tidak
+   mungkin ada yang bekerja di atas data lama.
+   ============================================================ */
+var Simpanan = {
+  isi: {},
+  UMUR: 120000,          // dua menit untuk detail transaksi
+  UMUR_DAFTAR: 20000,    // dua puluh detik untuk daftar antrian
+
+  ambil: function (kunci) {
+    var x = Simpanan.isi[kunci];
+    if (!x) return null;
+
+    // Daftar antrian lebih cepat basi daripada detail transaksi
+    var umur = String(kunci).indexOf('L:') === 0
+      ? Simpanan.UMUR_DAFTAR : Simpanan.UMUR;
+
+    if (Date.now() - x.jam > umur) { delete Simpanan.isi[kunci]; return null; }
+    return x.data;
+  },
+
+  taruh: function (kunci, data) {
+    Simpanan.isi[kunci] = { jam: Date.now(), data: data };
+  },
+
+  buang: function (awalan) {
+    Object.keys(Simpanan.isi).forEach(function (k) {
+      if (!awalan || k.indexOf(awalan) === 0) delete Simpanan.isi[k];
+    });
+  }
+};
+
+/**
+ * Memuat daftar dengan simpanan pendek.
+ *
+ * Daftar yang sudah pernah dibuka digambar seketika dari salinan,
+ * lalu disegarkan di belakang. Yang dirasakan staf: menekan menu
+ * langsung menampilkan isinya, bukan tulisan "Memuat…" selama
+ * dua tiga detik.
+ *
+ * Umurnya sengaja pendek — dua puluh detik. Lebih lama dari itu,
+ * antrian yang ditampilkan bisa tertinggal dari kenyataan, dan
+ * daftar pekerjaan yang salah lebih berbahaya daripada daftar yang
+ * lambat.
+ */
+function apiDaftar(fnName, payload, kunci, gambar) {
+  var lama = Simpanan.ambil('L:' + kunci);
+  var adaLama = false;
+
+  if (lama) {
+    adaLama = true;
+    try { gambar(lama, true); } catch (e) {}
+  }
+
+  return api(fnName, payload).then(function (d) {
+    Simpanan.taruh('L:' + kunci, d);
+
+    /*
+     * Penggambaran dipisahkan dari pengambilan data.
+     *
+     * Kalau penggambarannya gagal — biasanya karena orangnya sudah
+     * pindah halaman dan kotak yang mau diisi sudah tidak ada —
+     * itu bukan kegagalan memuat data. Dulu keduanya tercampur, dan
+     * yang muncul pesan "gagal memuat" padahal datanya sampai dengan
+     * selamat dan halamannya memang sudah ditinggalkan.
+     */
+    try { gambar(d, false); } catch (eG) { console.error(eG); }
+    return d;
+
+  }).catch(function (e) {
+    if (adaLama) { toast('Gagal menyegarkan daftar.', 'err'); return lama; }
+    throw e;
+  });
+}
+
+/**
+ * Memanggil server dengan simpanan.
+ *
+ * gambar(data, dariSimpanan) dipanggil sekali dengan data lama kalau
+ * ada, lalu sekali lagi dengan data yang baru dari server.
+ */
+function apiSimpan(fnName, payload, kunci, gambar) {
+  var lama = Simpanan.ambil(kunci);
+  if (lama) {
+    try { gambar(lama, true); } catch (e) {}
+  }
+
+  return api(fnName, payload).then(function (d) {
+    Simpanan.taruh(kunci, d);
+    gambar(d, false);
+    return d;
+  }).catch(function (e) {
+    // Kalau sudah ada yang tergambar dari simpanan, kegagalan menyegarkan
+    // tidak perlu mengosongkan layar — cukup diberi tahu
+    if (lama) { toast('Gagal menyegarkan: ' + e.message, 'err'); return lama; }
+    throw e;
+  });
+}
+
+/* ============================================================
+   Menyimpan di latar belakang
+
+   Staf tidak menunggu penyimpanan selesai. Layar langsung berpindah,
+   pekerjaan berikutnya bisa dimulai, dan penyimpanannya diselesaikan
+   di belakang.
+
+   Dasarnya: yang sudah dikerjakan tidak berubah kalau ditunggu atau
+   tidak. Barang sudah di meja, SN sudah diketik, nota sudah terbit di
+   sistem kantor. Menatap layar selama enam detik tidak menambah apa pun,
+   dan saat ramai jeda itu berlipat — lima permintaan bersamaan jadi
+   setengah menit yang terbuang.
+
+   Yang dijaga supaya tetap aman:
+
+   1. Kegagalan TIDAK lewat begitu saja. Yang muncul kotak merah yang
+      harus ditutup, menyebutkan apa yang gagal dan tombol mengulang.
+   2. Jumlah yang sedang disimpan terlihat di pojok layar.
+   3. Menutup tab saat masih ada yang tersimpan akan diperingatkan.
+
+   TIDAK dipakai untuk pencatatan pembayaran. Kalau itu gagal diam-diam,
+   uang sudah diterima dan tidak tercatat — kesalahan yang baru ketahuan
+   saat tutup kas.
+   ============================================================ */
+var Latar = {
+  antre: 0,
+
+  /**
+   * fnName, payload — seperti api() biasa
+   * opsi:
+   *   judul     — nama pekerjaan, muncul di pesan
+   *   berhasil  — fungsi dipanggil kalau tersimpan
+   *   gagal     — fungsi dipanggil kalau gagal, sebelum kotak merah
+   *   ulangi    — fungsi dipanggil kalau staf menekan "Coba lagi"
+   */
+  simpan: function (fnName, payload, opsi) {
+    opsi = opsi || {};
+    var judul = opsi.judul || 'Perubahan';
+
+    Latar.antre++;
+    Latar.gambarPenanda();
+
+    return api(fnName, payload).then(function (r) {
+      Latar.antre--;
+      Latar.gambarPenanda();
+      if (opsi.berhasil) { try { opsi.berhasil(r); } catch (e) {} }
+      return r;
+
+    }).catch(function (e) {
+      Latar.antre--;
+      Latar.gambarPenanda();
+
+      if (opsi.gagal) { try { opsi.gagal(e); } catch (e2) {} }
+      if (opsi.diamSaatGagal) throw e;
+
+      try { Bunyi.salah(); } catch (e3) {}
+
+      Modal.open({
+        title: '⚠ ' + judul + ' GAGAL disimpan',
+        sub: 'Perubahan ini BELUM tersimpan. Ulangi, atau kerjakan lagi dari awal.',
+        okText: opsi.ulangi ? 'Coba lagi' : 'Mengerti',
+        cancelText: opsi.ulangi ? 'Nanti saja' : '',
+        body: '<div style="background:var(--danger-soft);color:var(--danger);' +
+          'padding:11px 13px;border-radius:9px"><b>' + Fmt.esc(e.message) + '</b></div>' +
+          (opsi.keterangan
+            ? '<div class="small muted mt16">' + Fmt.esc(opsi.keterangan) + '</div>' : ''),
+        onOk: function (tutup) {
+          tutup();
+          if (opsi.ulangi) { try { opsi.ulangi(); } catch (e4) {} }
+        }
+      });
+
+      throw e;
+    });
+  },
+
+  gambarPenanda: function () {
+    var el = document.getElementById('latar-antre');
+
+    if (Latar.antre <= 0) { if (el) el.remove(); return; }
+
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'latar-antre';
+      el.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:70;' +
+        'background:#1F2733;color:#fff;padding:8px 14px;border-radius:20px;' +
+        'font-size:12.5px;display:flex;align-items:center;gap:8px;opacity:.92';
+      document.body.appendChild(el);
+    }
+
+    el.innerHTML = '<span class="spin" style="width:13px;height:13px;' +
+      'border-color:rgba(255,255,255,.3);border-top-color:#fff"></span>' +
+      Latar.antre + ' sedang disimpan';
+  }
+};
+
+/*
+ * Menutup tab saat masih ada yang tersimpan akan kehilangan
+ * perubahan itu. Browser hanya mengizinkan peringatan bawaan,
+ * tapi itu sudah cukup untuk menahan sebentar.
+ */
+window.addEventListener('beforeunload', function (e) {
+  if (Latar.antre > 0) {
+    e.preventDefault();
+    e.returnValue = '';
+    return '';
+  }
+});
+
+/* ============================================================
+   PENANDA SEDANG MEMUAT
+
+   Garis tipis di bagian paling atas layar, muncul selama ada
+   permintaan ke server dan hilang begitu semuanya selesai.
+
+   Dipilih bentuk ini, bukan penutup layar yang menghalangi:
+   penutup membuat orang menunggu padahal sebagian besar layar
+   sudah bisa dipakai. Garis tipis memberi tahu tanpa menahan.
+
+   Tidak ada jeda buatan di mana pun — penandanya mengikuti
+   permintaan yang memang sedang berjalan.
+   ============================================================ */
+var Muat = {
+  jumlah: 0,
+  gagal: false,
+
+  /**
+   * Keadaan sinkron, ditunjukkan lewat titik pada ikon awan.
+   *
+   *   hijau         semua tersimpan
+   *   biru berkedip sedang mengirim atau mengambil
+   *   merah         gagal, perlu dicoba lagi
+   *   abu-abu       tidak ada sambungan
+   */
+  set: function (keadaan) {
+    var t = document.getElementById('awan-titik');
+    if (!t) return;
+    t.className = 'awan-titik ' + keadaan;
+
+    var pesan = {
+      ok: 'Semua catatan sudah tersimpan',
+      kirim: 'Sedang mengirim atau mengambil data',
+      gagal: 'Gagal sinkron — ketuk untuk mencoba lagi',
+      offline: 'Tidak ada sambungan. Catatan aman di perangkat ini.'
+    };
+
+    var tombol = document.getElementById('awan');
+    if (tombol) tombol.title = pesan[keadaan] || '';
+  },
+
+  mulai: function () {
+    Muat.jumlah++;
+    if (!Muat.gagal) Muat.set('kirim');
+  },
+
+  selesai: function (adaMasalah) {
+    Muat.jumlah = Math.max(Muat.jumlah - 1, 0);
+    if (adaMasalah) Muat.gagal = true;
+
+    if (Muat.jumlah > 0) return;
+
+    if (Muat.gagal) Muat.set('gagal');
+    else if (!navigator.onLine) Muat.set('offline');
+    else Muat.set('ok');
+  }
+};
+
+window.addEventListener('online', function () { Muat.gagal = false; Muat.selesai(); });
+window.addEventListener('offline', function () { Muat.set('offline'); });
+
+/**
+ * Tulisan "Memuat…" dengan titik yang bergerak.
+ *
+ * Dipakai untuk mengisi bagian layar yang datanya belum sampai,
+ * supaya yang terlihat bukan ruang kosong yang terasa macet.
+ */
+function memuatHtml(teks) {
+  return '<div class="empty"><b>' + (teks || 'Memuat') +
+    '<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div>';
+}
+
+function api(fnName, payload, percobaan) {
+  payload = payload || {};
+  payload._fn = fnName;          // dipakai server untuk mengukur lama tiap fungsi
+  percobaan = percobaan || 0;
+  if (App.state.session && App.state.session.token) payload.token = App.state.session.token;
+
+  Muat.mulai();
+
+  return new Promise(function (resolve, reject) {
+    google.script.run
+      .withSuccessHandler(function (raw) {
+        Muat.selesai();
+        if (!raw) return reject({ code: 'EMPTY', message: 'Server tidak menjawab. Coba lagi.' });
+
+        // Server selalu menjawab dalam bentuk teks JSON. Tanpa diurai
+        // dulu, pemeriksaan r.ok di bawah membaca teks biasa dan selalu
+        // dianggap gagal — tanpa pesan apa pun.
+        var r = raw;
+        if (typeof raw === 'string') {
+          try {
+            r = JSON.parse(raw);
+          } catch (e) {
+            return reject({
+              code: 'BAD_JSON',
+              message: 'Jawaban server tidak terbaca: ' + String(raw).substring(0, 200)
+            });
+          }
+        }
+
+        if (!r || typeof r !== 'object') {
+          return reject({ code: 'BAD_SHAPE', message: 'Bentuk jawaban server tidak dikenal.' });
+        }
+
+        if (r.ok) {
+          // Permintaan yang mengubah data membawa penanda sekali-pakai.
+          // Begitu ada yang berubah, seluruh simpanan dibuang supaya
+          // tidak ada yang bekerja di atas data lama.
+          if (payload.idem) Simpanan.buang();
+          return resolve(r.data);
+        }
+        if (r.code === 'NO_SESSION') App.forceLogout(r.message);
+
+        /*
+         * Giliran penuh bukan kesalahan siapa pun — cukup dicoba lagi.
+         *
+         * Aman diulang karena permintaan yang mengubah data membawa
+         * penanda sekali-pakai: kalau yang pertama ternyata sudah
+         * tersimpan, server mengembalikan hasil yang sama, bukan
+         * menyimpan dua kali.
+         */
+        if (r.code === 'LOCK_BUSY' && payload.idem && percobaan < 2) {
+          return setTimeout(function () {
+            api(fnName, payload, percobaan + 1).then(resolve, reject);
+          }, 2500 + percobaan * 2000);
+        }
+
+        reject(r);
+      })
+      .withFailureHandler(function (e) {
+        Muat.selesai(true);
+        reject({ code: 'NET', message: (e && e.message) ? e.message : 'Koneksi terputus. Cek internet, lalu coba lagi.' });
+      })[fnName](payload);
+  });
+}
+
+function debounce(fn, ms) {
+  var t;
+  return function () {
+    var a = arguments, self = this;
+    clearTimeout(t);
+    t = setTimeout(function () { fn.apply(self, a); }, ms || 300);
+  };
+}
+
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
+}
+
+var Fmt = {
+  rp: function (n) {
+    return 'Rp' + (Number(n) || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 });
+  },
+  angka: function (n) {
+    return (Number(n) || 0).toLocaleString('id-ID', { maximumFractionDigits: 0 });
+  },
+  /**
+   * Membaca angka rupiah yang diketik orang.
+   *
+   * Tanda minus di depan dipertahankan — itu baris potongan:
+   * voucher, promo, kompensasi. Sebelumnya semua selain angka
+   * dibuang, jadi "-50.000" terbaca 50.000 dan potongannya malah
+   * menambah tagihan.
+   *
+   * Minus hanya diakui di depan. Tanda minus di tengah angka
+   * hampir selalu salah ketik.
+   */
+  parseRp: function (s) {
+    var teks = String(s === undefined ? '' : s).trim();
+    // "Rp-50.000" juga terbaca minus — orang sering mengetik begitu
+    var minus = /-/.test(teks.replace(/[0-9.,\s]/g, '')) ||
+                /^-/.test(teks) || /^\(.*\)$/.test(teks);
+
+    var d = teks.replace(/[^0-9]/g, '');
+    if (d === '') return 0;
+
+    return minus ? -Number(d) : Number(d);
+  },
+  jam: function (iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    if (isNaN(d)) return String(iso);
+    return d.toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+  },
+  jamSaja: function (iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    if (isNaN(d)) return String(iso);
+    return d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+  },
+  esc: function (s) {
+    return String(s === undefined || s === null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  },
+  roleLabel: function (r) {
+    return { SALES: 'Sales', SALES_ONLINE: 'Sales Online',
+             GUDANG: 'Gudang', EKSEKUSI: 'Tim Eksekusi',
+             ADMIN: 'Admin', KASIR: 'Kasir',
+             TEKNISI: 'Teknisi Support', SUPERADMIN: 'Super Admin' }[r] || r;
+  },
+  branchLabel: function (b) {
+    return { PWT_KOTA: 'Purwokerto Kota', PURBALINGGA: 'Purbalingga', KEBUMEN: 'Kebumen' }[b] || b;
+  },
+  stageBadge: function (code, label) {
+    var cls = { DRAFT: '', MENUNGGU_GUDANG: 'brand', PROSES_GUDANG: 'warn',
+                SIAP_NOTA: 'warn', MENUNGGU_PEMBAYARAN: 'warn', SIAP_SERAH: 'ok',
+                MENUNGGU_AKTIVASI: 'brand', PROSES_AKTIVASI: 'brand',
+                AKTIVASI_SELESAI: 'ok', SELESAI: 'ok', DIBATALKAN: 'danger' }[code] || '';
+    return '<span class="badge ' + cls + '">' + Fmt.esc(label || code) + '</span>';
+  },
+  payBadge: function (code) {
+    var m = { BELUM_BAYAR: ['danger', 'Belum bayar'], DP: ['warn', 'DP'],
+              LUNAS: ['ok', 'Lunas'], REFUND: ['', 'Refund'] }[code] || ['', code];
+    return '<span class="badge ' + m[0] + '">' + Fmt.esc(m[1]) + '</span>';
+  },
+  rowMark: function (code) {
+    if (['SELESAI', 'AKTIVASI_SELESAI'].indexOf(code) >= 0) return 'on';
+    if (code === 'DIBATALKAN') return 'off';
+    if (code === 'DRAFT') return '';
+    return 'hold';
+  }
+};
+
+function toast(msg, type, title) {
+  var el = document.createElement('div');
+  el.className = 'toast ' + (type || '');
+  el.innerHTML = (title ? '<div><b>' + Fmt.esc(title) + '</b>' + Fmt.esc(msg) + '</div>'
+                        : '<div>' + Fmt.esc(msg) + '</div>');
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(function () {
+    el.style.transition = 'opacity .2s'; el.style.opacity = '0';
+    setTimeout(function () { el.remove(); }, 220);
+  }, type === 'err' ? 5200 : 3200);
+}
+
+var Modal = {
+  open: function (o) {
+    var root = document.getElementById('modal-root');
+    root.innerHTML =
+      '<div class="modal-bg" id="mbg">' +
+        '<div class="modal" role="dialog" aria-modal="true">' +
+          '<div class="modal-head"><h3>' + Fmt.esc(o.title) + '</h3>' +
+            (o.sub ? '<p>' + Fmt.esc(o.sub) + '</p>' : '') + '</div>' +
+          '<div class="modal-body">' + (o.body || '') + '</div>' +
+          '<div class="modal-foot">' +
+            (o.cancel === false ? '' : '<button class="btn ghost" id="m-cancel">' + Fmt.esc(o.cancelText || 'Batal') + '</button>') +
+            '<button class="btn ' + (o.danger ? 'danger' : '') + '" id="m-ok">' + Fmt.esc(o.okText || 'Simpan') + '</button>' +
+          '</div>' +
+        '</div></div>';
+
+    var close = function () { root.innerHTML = ''; };
+    if (o.cancel !== false) document.getElementById('m-cancel').onclick = close;
+    document.getElementById('mbg').onclick = function (e) { if (e.target.id === 'mbg' && o.cancel !== false) close(); };
+    document.getElementById('m-ok').onclick = function () {
+      if (o.onOk) o.onOk(close, document.getElementById('m-ok'));
+      else close();
+    };
+    if (o.onMount) o.onMount();
+    var f = root.querySelector('input,select,textarea');
+    if (f) f.focus();
+    return close;
+  },
+
+  confirm: function (title, sub, okText, onYes, danger) {
+    Modal.open({
+      title: title, sub: sub, okText: okText || 'Ya, lanjutkan', danger: danger,
+      body: '', onOk: function (close) { close(); onYes(); }
+    });
+  }
+};
+
+function btnBusy(btn, busy, label) {
+  if (!btn) return;
+  if (busy) {
+    btn.dataset.label = btn.innerHTML;
+    btn.innerHTML = '<span class="spin"></span> ' + (label || 'Memproses');
+    btn.disabled = true;
+  } else {
+    btn.innerHTML = btn.dataset.label || label || 'Simpan';
+    btn.disabled = false;
+  }
+}
+
+/* ============================================================
+   MENU PER ROLE
+   Tanda ph = rencana phase. Item terbuka sendiri begitu halamannya
+   sudah ada, jadi daftar ini tidak perlu diubah tiap phase.
+   ============================================================ */
+var NAV = {
+  SALES: [
+    { k: 'home',   i: '🏠', t: 'Beranda' },
+    { k: 'order',  i: '🛒', t: 'Buat Pesanan' },
+    { k: 'mytrx',  i: '📋', t: 'Pesanan Saya' },
+    { k: 'cust',   i: '👥', t: 'Data Customer' },
+    { k: 'resep',  i: '🖨', t: 'Cetak Resep' },
+    { k: 'indent', i: '📦', t: 'Menunggu Barang' },
+    { k: 'menu',  i: '🧩', t: 'Atur Menu' },
+    { k: 'pesan',  i: '💬', t: 'Pesan' }
+  ],
+
+  /*
+   * Sales Online — menunya sama dengan Sales NB.
+   *
+   * Yang berbeda bukan menunya, melainkan isinya: layar Buat Pesanan
+   * sudah membawa kartu keterangan online sejak dibuka, dan Pesanan
+   * Saya hanya berisi pesanan online.
+   *
+   * Jadi tidak perlu menu "Pesanan Online" tersendiri — itu jalan
+   * keluar untuk akun bersama, dan sekarang akunnya memang terpisah.
+   */
+  SALES_ONLINE: [
+    { k: 'home',   i: '🏠', t: 'Beranda' },
+    { k: 'order',  i: '🌐', t: 'Buat Pesanan Online' },
+    { k: 'mytrx',  i: '📋', t: 'Pesanan Saya' },
+    { k: 'cari',   i: '🔍', t: 'Cari Pesanan' },
+    { k: 'cust',   i: '👥', t: 'Data Customer' },
+    { k: 'resep',  i: '🖨', t: 'Cetak Resep' },
+    { k: 'indent', i: '📦', t: 'Menunggu Barang' },
+    { k: 'menu',  i: '🧩', t: 'Atur Menu' },
+    { k: 'pesan',  i: '💬', t: 'Pesan' }
+  ],
+  GUDANG: [
+    { k: 'home',  i: '🏠', t: 'Beranda' },
+    { k: 'queue', i: '📥', t: 'Antrian Pesanan' },
+    { k: 'ganti', i: '🔁', t: 'Ganti Unit' },
+    { k: 'done',  i: '✅', t: 'Sudah Disiapkan' },
+    { k: 'lacak', i: '🔦', t: 'Lacak Barang Keluar' },
+    { k: 'sn',    i: '🏷️', t: 'Kelola Serial Number' }
+  ],
+  ADMIN: [
+    { k: 'home',    i: '🏠', t: 'Beranda' },
+    { k: 'nota',    i: '🧾', t: 'Resep & Nota' },
+    { k: 'resep',   i: '🖨', t: 'Cetak Resep' },
+    { k: 'indent',  i: '📦', t: 'Menunggu Barang' },
+    { k: 'ganti',   i: '🔁', t: 'Ganti Unit' },
+    { k: 'monitor', i: '◎', t: 'Monitoring' },
+    { k: 'mytrx',   i: '☰', t: 'Semua Transaksi' },
+    { k: 'cust',    i: '👥', t: 'Data Customer' },
+    { k: 'produk',  i: '📦', t: 'Master Barang' },
+    { k: 'laporan', i: '📊', t: 'Laporan' },
+    { k: 'sn',      i: '🏷️', t: 'Kelola Serial Number' },
+    { k: 'menu',  i: '🧩', t: 'Atur Menu' },
+    { k: 'pesan', i: '💬', t: 'Pesan' },
+    { k: 'notif',   i: '🔔', t: 'Pemberitahuan' }
+  ],
+  KASIR: [
+    { k: 'home',   i: '🏠', t: 'Beranda' },
+    { k: 'pay',    i: '💰', t: 'Pembayaran' },
+    { k: 'hist',   i: '☰', t: 'Riwayat Bayar' },
+    { k: 'pantau', i: '🧭', t: 'Pantau Alur' },
+    { k: 'menu',  i: '🧩', t: 'Atur Menu' },
+    { k: 'pesan', i: '💬', t: 'Pesan' },
+    { k: 'notif',  i: '🔔', t: 'Pemberitahuan' }
+  ],
+  /*
+   * Tim Eksekusi — penyiap pesanan online.
+   *
+   * Menunya sama dengan Gudang karena pekerjaannya memang sama.
+   * Yang berbeda cuma isi antriannya: Gudang melihat pesanan ritel,
+   * Eksekusi melihat pesanan online.
+   */
+  EKSEKUSI: [
+    { k: 'home',  i: '🏠', t: 'Beranda' },
+    { k: 'queue', i: '📥', t: 'Antrian Online' },
+    { k: 'serah',  i: '📬', t: 'Siap Diserahkan' },
+    { k: 'indent', i: '📦', t: 'Menunggu Barang' },
+    { k: 'done',   i: '✅', t: 'Sudah Disiapkan' },
+    { k: 'cari',   i: '🔍', t: 'Cari Pesanan' },
+    { k: 'resep', i: '🖨', t: 'Cetak Resep' },
+    { k: 'ganti', i: '🔁', t: 'Ganti Unit' },
+    { k: 'lacak', i: '🔦', t: 'Lacak Barang Keluar' },
+    { k: 'pantau', i: '🧭', t: 'Pantau Alur' },
+    { k: 'menu',  i: '🧩', t: 'Atur Menu' },
+    { k: 'pesan', i: '💬', t: 'Pesan' },
+    { k: 'notif', i: '🔔', t: 'Pemberitahuan' }
+  ],
+
+  TEKNISI: [
+    { k: 'home',   i: '🏠', t: 'Beranda' },
+    { k: 'act',    i: '🛠️', t: 'Antrian Pekerjaan' },
+    { k: 'call',   i: '📣', t: 'Panggil Customer' },
+    { k: 'riwakt', i: '🗂️', t: 'Riwayat Pekerjaan' },
+    { k: 'kerja',  i: '✍️', t: 'Catat Pekerjaan' },
+    { k: 'lapteknisi', i: '📈', t: 'Laporan Teknisi' },
+    { k: 'pantau', i: '🧭', t: 'Pantau Alur' },
+    { k: 'menu',  i: '🧩', t: 'Atur Menu' },
+    { k: 'pesan', i: '💬', t: 'Pesan' },
+    { k: 'notif',  i: '🔔', t: 'Pemberitahuan' }
+  ],
+  /*
+   * Super Admin memegang semua menu, tapi dikelompokkan per divisi
+   * dan bisa dilipat.
+   *
+   * Kalau ditampilkan berderet begitu saja, isinya dua puluh baris —
+   * dan daftar sepanjang itu justru membuat yang dicari makin sulit
+   * ditemukan. Kelompok yang terlipat menyembunyikan yang sedang tidak
+   * dipakai tanpa menghilangkannya.
+   */
+  SUPERADMIN: [
+    { k: 'home',    i: '🏠', t: 'Beranda' },
+    { k: 'monitor', i: '◎', t: 'Monitoring' },
+
+    { grup: 'Sales', ikon: '✚', isi: [
+      { k: 'order',  i: '🛒', t: 'Buat Pesanan' },
+      { k: 'online', i: '🌐', t: 'Pesanan Online' },
+      { k: 'mytrx',  i: '☰', t: 'Semua Transaksi' },
+      { k: 'cust',   i: '👥', t: 'Data Customer' },
+      { k: 'resep',  i: '🖨', t: 'Cetak Resep' },
+      { k: 'indent', i: '📦', t: 'Menunggu Barang' }
+    ]},
+
+    { grup: 'Gudang', ikon: '🔔', isi: [
+      { k: 'queue', i: '📥', t: 'Antrian Pesanan' },
+      { k: 'done',  i: '✅', t: 'Sudah Disiapkan' },
+      { k: 'ganti', i: '🔁', t: 'Ganti Unit' },
+    { k: 'lacak', i: '🔦', t: 'Lacak Barang Keluar' }
+    ]},
+
+    { grup: 'Admin', ikon: '🧾', isi: [
+      { k: 'nota',    i: '🧾', t: 'Resep & Nota' },
+      { k: 'approve', i: '🔖', t: 'Approval Harga' }
+    ]},
+
+    { grup: 'Kasir', ikon: '💰', isi: [
+      { k: 'pay',  i: '💰', t: 'Pembayaran' },
+      { k: 'hist', i: '☰', t: 'Riwayat Bayar' }
+    ]},
+
+    { grup: 'Teknisi', ikon: '🔧', isi: [
+      { k: 'act',  i: '🛠️', t: 'Antrian Pekerjaan' },
+      { k: 'call',   i: '📣', t: 'Panggil Customer' },
+      { k: 'riwakt', i: '🗂️', t: 'Riwayat Pekerjaan' },
+      { k: 'kerja',  i: '✍️', t: 'Catat Pekerjaan' },
+      { k: 'lapteknisi', i: '📈', t: 'Laporan Teknisi' },
+      { k: 'pantau', i: '🧭', t: 'Pantau Alur' }
+    ]},
+
+    { grup: 'Sistem', ikon: '⚙', isi: [
+      { k: 'users',   i: '🔑', t: 'Kelola User' },
+      { k: 'produk',  i: '📦', t: 'Master Barang' },
+      { k: 'laporan', i: '📊', t: 'Laporan' },
+      { k: 'qr',      i: '🔳', t: 'QR Customer' },
+      { k: 'audit',   i: '🕘', t: 'Riwayat Perubahan' },
+      { k: 'menu',  i: '🧩', t: 'Atur Menu' },
+    { k: 'pesan',   i: '💬', t: 'Pesan' },
+      { k: 'notif',   i: '🔔', t: 'Pemberitahuan' },
+      { k: 'setting', i: '⚙️', t: 'Pengaturan' }
+    ]}
+  ]
+};
+
+/* ============================================================
+   APLIKASI
+   ============================================================ */
+var App = {
+  state: { session: null, meta: window.APP_META, page: 'home', param: null },
+  pages: {},
+
+  start: function () {
+    var token = Store.get('els_token');
+    api('apiBootstrap', { token: token }).then(function (d) {
+      App.state.meta.company = d.company;
+      /*
+       * Warna merek dari pengaturan sengaja TIDAK dipasang lagi.
+       *
+       * Nilai bawaannya biru, dan itulah yang membuat layar berubah
+       * biru beberapa saat setelah terbuka — jingga dari lembar
+       * gaya ditimpa oleh pengaturan lama yang tidak pernah
+       * disentuh siapa pun.
+       *
+       * Warnanya sekarang satu tempat saja: lembar gaya. Kalau
+       * suatu saat mau diubah lewat pengaturan, nilainya harus
+       * diisi benar dulu di sana.
+       */
+      if (d.session) { App.state.session = d.session; App.afterLogin(); }
+      else { Store.del('els_token'); App.renderLogin(); }
+    }).catch(function (e) {
+      // Pesannya tidak boleh kosong. Layar kosong membuat masalah sekecil
+      // apa pun jadi tidak bisa ditelusuri.
+      var pesan = (e && e.message) ? e.message : '';
+      var kode = (e && e.code) ? e.code : '';
+      if (!pesan) {
+        pesan = 'Server menolak permintaan tanpa memberi keterangan.' +
+                (kode ? ' Kode: ' + kode : '') +
+                ' Buka menu Executions di Apps Script untuk melihat penyebabnya.';
+      } else if (kode) {
+        pesan += ' (' + kode + ')';
+      }
+
+      document.getElementById('app').innerHTML =
+        '<div class="empty" style="padding-top:80px"><b>Aplikasi tidak bisa dimuat</b>' +
+        Fmt.esc(pesan) +
+        '<div class="mt16"><button class="btn" onclick="location.reload()">Muat ulang</button></div>' +
+        '<div class="mt16"><button class="btn ghost" onclick="Store.del(\'els_token\');location.reload()">' +
+        'Bersihkan sesi lalu muat ulang</button></div></div>';
+    });
+  },
+
+  renderLogin: function () {
+    document.getElementById('app').innerHTML = App.pages.login.html();
+    App.pages.login.mount();
+  },
+
+  menuIzin: null,
+  menuUrut: [],
+
+  afterLogin: function () {
+    Store.set('els_token', App.state.session.token);
+
+    /*
+     * Pengaturan menu diambil SEBELUM layar digambar.
+     *
+     * Sebelumnya digambar dulu lalu diperbaiki setelah pengaturannya
+     * datang — hasilnya menu lengkap berkelebat sesaat, lalu
+     * sebagiannya hilang. Berkedip seperti itu membuat orang
+     * mengira ada yang salah.
+     *
+     * Yang terlihat selama menunggu: layar muat dengan nama toko.
+     * Sepersekian detik, dan tidak ada yang berubah setelahnya.
+     */
+    /*
+     * Pengaturan menu diingat di perangkat ini.
+     *
+     * Isinya jarang berubah, jadi kalau sudah pernah diambil,
+     * layarnya langsung digambar tanpa menunggu apa pun — dan
+     * pengambilan barunya berjalan di belakang untuk jaga-jaga
+     * kalau Super Admin baru saja mengubahnya.
+     *
+     * Hasilnya: yang masuk setiap hari tidak pernah melihat layar
+     * muat dua kali.
+     */
+    var simpanan = null;
+    try { simpanan = JSON.parse(Store.get('els_menu') || 'null'); } catch (e) {}
+
+    if (simpanan && simpanan.peran === App.state.session.role) {
+      App.menuIzin = simpanan.izin || null;
+      App.menuUrut = simpanan.urut || [];
+      if (simpanan.sales_code && !App.state.session.sales_code) {
+        App.state.session.sales_code = simpanan.sales_code;
+      }
+      App.renderShell();
+      App.lanjutSetelahMasuk();
+      App.segarkanMenu(true);
+      return;
+    }
+
+    App.tampilMuat();
+    App.segarkanMenu(false);
+  },
+
+  /** Mengambil pengaturan menu; diam-diam kalau layarnya sudah tampil */
+  segarkanMenu: function (diam) {
+    api('apiMenuSaya', {}).then(function (m) {
+      var baru = JSON.stringify({
+        peran: App.state.session.role, izin: m.izin || null, urut: m.urut || [],
+        sales_code: m.sales_code || ''
+      });
+
+      var berubah = baru !== Store.get('els_menu');
+      Store.set('els_menu', baru);
+
+      App.menuIzin = m.izin || null;
+      App.menuUrut = m.urut || [];
+
+      // Sesi lama bisa belum membawa kode sales — diambil dari sini
+      if (m.sales_code && App.state.session && !App.state.session.sales_code) {
+        App.state.session.sales_code = m.sales_code;
+        berubah = true;
+      }
+
+      if (diam) {
+        // Hanya digambar ulang kalau memang ada yang berubah
+        if (berubah) App.renderShell();
+        return;
+      }
+
+      App.renderShell();
+      App.lanjutSetelahMasuk();
+    }).catch(function () {
+      if (diam) return;
+      App.renderShell();
+      App.lanjutSetelahMasuk();
+    });
+  },
+
+  /** Layar muat sementara, dengan nama toko supaya tidak terasa kosong */
+  tampilMuat: function () {
+    var nama = (App.state.meta && App.state.meta.company) || 'ELS.ID Purwokerto';
+
+    document.getElementById('app').innerHTML =
+      '<div class="splash">' +
+        '<div class="splash-logo">' +
+          '<svg viewBox="0 0 48 48" width="58" height="58" aria-hidden="true">' +
+            '<path d="M6 40V20l10-7 10 7v20" fill="none" stroke="currentColor" ' +
+              'stroke-width="2.6" stroke-linejoin="round"/>' +
+            '<path d="M26 40V14l8-5 8 5v26" fill="none" stroke="currentColor" ' +
+              'stroke-width="2.6" stroke-linejoin="round"/>' +
+            '<path d="M12 40v-9h8v9M32 40v-7h6v7" fill="none" stroke="currentColor" ' +
+              'stroke-width="2.6" stroke-linejoin="round"/>' +
+            '<path d="M3 40h42" stroke="currentColor" stroke-width="2.6" ' +
+              'stroke-linecap="round"/>' +
+          '</svg>' +
+        '</div>' +
+        '<b>' + Fmt.esc(nama) + '</b>' +
+        '<span>Menyiapkan layar…</span>' +
+        '<div class="splash-bar"><i></i></div>' +
+      '</div>';
+  },
+
+  lanjutSetelahMasuk: function () {
+    if (App.state.session.must_change_pin) {
+      App.changePin(true);
+    } else {
+      var h = App.parseHash();
+      App.go(h.key || 'home', h.param);
+    }
+    App.startPing();
+  },
+
+  parseHash: function () {
+    var raw = location.hash.replace('#/', '');
+    if (!raw) return { key: '', param: null };
+    var p = raw.split('/');
+    return { key: p[0], param: p[1] ? decodeURIComponent(p[1]) : null };
+  },
+
+  /**
+   * Menggambar daftar menu.
+   *
+   * Menu biasa langsung jadi satu baris. Menu berkelompok — hanya
+   * dipakai Super Admin — jadi judul yang bisa dilipat, dengan isinya
+   * menjorok ke dalam. Kelompok yang sedang dibuka diingat per
+   * perangkat, jadi tidak menutup sendiri tiap pindah halaman.
+   */
+  navHtml: function (nav) {
+    var buka = {};
+    try { buka = JSON.parse(Store.get('els_nav_buka') || '{}'); } catch (e) {}
+
+    var satu = function (n) {
+      var belum = !App.pages[n.k];
+      return '<a data-k="' + n.k + '" data-ph="' + Fmt.esc(n.ph || '') + '" ' +
+        'class="' + (belum ? 'soon' : '') + '">' +
+        '<span class="rail-ico">' + n.i + '</span>' + Fmt.esc(n.t) +
+        (belum && n.ph ? '<span class="ph">' + Fmt.esc(n.ph) + '</span>' : '') + '</a>';
+    };
+
+    return nav.map(function (n) {
+      if (!n.grup) return satu(n);
+
+      var isiAda = (n.isi || []).filter(function (x) { return App.pages[x.k]; });
+      if (!isiAda.length) return '';
+
+      var terbuka = !!buka[n.grup];
+      return '<div class="nav-grup' + (terbuka ? ' buka' : '') + '" data-grup="' +
+          Fmt.esc(n.grup) + '">' +
+        '<a class="nav-grup-judul">' +
+          '<span class="rail-ico">' + n.ikon + '</span>' + Fmt.esc(n.grup) +
+          '<span class="nav-panah">' + (terbuka ? '▾' : '▸') + '</span>' +
+        '</a>' +
+        '<div class="nav-grup-isi">' + isiAda.map(satu).join('') + '</div>' +
+      '</div>';
+    }).join('');
+  },
+
+  /**
+   * Menu bawah: empat yang paling sering dipakai, plus tombol Menu.
+   *
+   * Yang muncul diambil dari urutan menu perannya — yang teratas
+   * memang yang paling sering dibuka, karena itu urutannya memang
+   * disusun begitu. Beranda selalu ikut supaya ada jalan pulang.
+   */
+  renderTabbar: function (nav) {
+    var bar = document.getElementById('tabbar');
+    if (!bar) return;
+
+    var rata = [];
+    nav.forEach(function (x) {
+      if (x.grup) { (x.items || []).forEach(function (y) { rata.push(y); }); }
+      else rata.push(x);
+    });
+
+    /*
+     * Tiga menu teratas, ditambah Omzet Saya kalau ada.
+     *
+     * Omzet adalah hal yang dilihat berkali-kali sehari oleh sales
+     * — menyembunyikannya di balik tombol Menu membuat angka yang
+     * paling ingin diketahui justru paling jauh dijangkau.
+     */
+    var utama = rata.filter(function (x) {
+      return ['notif', 'home', 'omset'].indexOf(x.k) < 0;
+    }).slice(0, App.state.session && App.state.session.sales_code ? 2 : 3);
+
+    if (App.state.session && App.state.session.sales_code) {
+      var om = rata.filter(function (x) { return x.k === 'omset'; })[0];
+      if (om) utama.unshift(om);
+    }
+
+    var isi = [{ k: 'home', i: '🏠', t: 'Beranda' }].concat(utama);
+
+    bar.innerHTML = isi.map(function (x) {
+      return '<a data-k="' + x.k + '" class="tab">' +
+        '<span class="tab-ikon">' + x.i + '</span>' +
+        '<span class="tab-teks">' + Fmt.esc(x.t.split(' ')[0]) + '</span>' +
+        '</a>';
+    }).join('') +
+      '<a data-menu="1" class="tab"><span class="tab-ikon">☰</span>' +
+      '<span class="tab-teks">Menu</span></a>';
+
+    /*
+     * Menu yang sudah ada di bawah tidak diulang di laci.
+     *
+     * Mengulangnya membuat orang ragu: dua tempat untuk menu yang
+     * sama, dan laci jadi panjang oleh hal yang sudah terlihat.
+     */
+    var dibawah = isi.map(function (x) { return x.k; });
+    App.menuLaci = dibawah;
+
+    bar.onclick = function (e) {
+      var a = e.target.closest('a'); if (!a) return;
+
+      if (a.dataset.menu) {
+        App.bukaLaci();
+        return;
+      }
+      App.go(a.dataset.k);
+    };
+  },
+
+  /**
+   * Menyaring dan menyusun ulang menu sesuai pengaturan.
+   *
+   * Dua sumber: daftar yang diizinkan untuk divisinya (diatur Super
+   * Admin) dan urutan pilihan orangnya sendiri. Keduanya hanya
+   * mengatur yang sudah ada — tidak ada menu baru yang bisa muncul
+   * dari sini.
+   *
+   * Kalau belum pernah diatur, yang dipakai susunan bawaan.
+   */
+  susunNav: function (nav) {
+    var izin = App.menuIzin;      // null = semua
+    var urut = App.menuUrut || [];
+
+
+
+    if (!izin && !urut.length) return App.tambahOmset(nav);
+
+    // Menu sisipan tidak ikut disaring daftar izin
+    var izinPlus = izin ? izin.concat(['omset']) : null;
+
+    var rata = [];
+    nav.forEach(function (x) {
+      if (x.grup) (x.items || []).forEach(function (y) { rata.push(y); });
+      else rata.push(x);
+    });
+
+    /*
+     * Menu sisipan ikut disusun bersama yang lain.
+     *
+     * Omzet Saya tidak berdiri di daftar menu perannya. Kalau
+     * disisipkan setelah penyusunan, posisinya selalu dipaksa ke
+     * tempat yang sama — dan urutan yang disimpan orangnya tidak
+     * pernah berlaku untuk menu itu.
+     *
+     * Jadi dimasukkan di sini, sebelum penyaringan dan pengurutan,
+     * supaya diperlakukan persis seperti menu lainnya.
+     */
+    rata = App.tambahOmset(rata);
+
+    /*
+     * Menu Omzet Saya tidak ikut disaring pengaturan.
+     *
+     * Menu itu muncul karena akunnya ditautkan ke kode sales, bukan
+     * karena diatur Super Admin — jadi tidak pernah ada di daftar
+     * izin, dan tanpa pengecualian ini selalu terbuang begitu
+     * pengaturan menu dipakai.
+     */
+    var boleh = rata.filter(function (x) {
+      if (x.k === 'omset') return true;
+      return !izin || izin.indexOf(x.k) >= 0;
+    });
+
+    /*
+     * Jalan keluar ini sempat melewati penambahan menu Omzet.
+     *
+     * Fungsinya punya tiga jalan keluar, dan dua di antaranya sudah
+     * memanggil penambahan itu — yang satu ini terlewat. Akibatnya
+     * menunya tidak pernah muncul untuk akun yang belum pernah
+     * menyusun urutan menunya sendiri, yaitu hampir semua orang.
+     */
+    if (!urut.length) return boleh;
+
+    var hasil = [];
+    urut.forEach(function (k) {
+      boleh.forEach(function (x) { if (x.k === k && hasil.indexOf(x) < 0) hasil.push(x); });
+    });
+
+    // Menu yang belum ada di urutan simpanan menyusul di bawah
+    boleh.forEach(function (x) { if (hasil.indexOf(x) < 0) hasil.push(x); });
+
+    return hasil;
+  },
+
+  /**
+   * Menyisipkan menu Omzet Saya untuk akun yang ditautkan ke kode
+   * sales.
+   *
+   * Ditambahkan SETELAH penyaringan izin, bukan sebelum — kalau
+   * sebelum, menu ini ikut terbuang karena belum ada di daftar
+   * izin yang tersimpan, dan tidak pernah muncul sama sekali.
+   *
+   * Akun divisi yang dipakai bersama tidak mendapatkannya: angkanya
+   * akan jadi campuran beberapa orang, dan itu lebih menyesatkan
+   * daripada tidak ada.
+   */
+  tambahOmset: function (nav) {
+    var s = App.state.session;
+    if (!s) return nav;
+
+    /*
+     * Ditampilkan untuk semua akun sales, bukan hanya yang sudah
+     * ditautkan ke kode sales.
+     *
+     * Sebelumnya bergantung pada kode sales yang ada di sesi — dan
+     * sesi itu bisa terlambat membawanya karena disimpan sebagai
+     * salinan. Hasilnya menunya hilang tanpa sebab yang terlihat.
+     *
+     * Sekarang menunya selalu ada untuk Sales, dan layarnya sendiri
+     * yang menjelaskan kalau akunnya memang belum ditautkan. Lebih
+     * baik menu yang menjelaskan daripada menu yang menghilang.
+     */
+    if (['SALES', 'SALES_ONLINE', 'SUPERADMIN'].indexOf(s.role) < 0) return nav;
+    if (nav.some(function (x) { return x.k === 'omset'; })) return nav;
+
+    var hasil = nav.slice();
+    hasil.splice(1, 0, { k: 'omset', i: '💰', t: 'Omzet Saya' });
+    return hasil;
+  },
+
+  /**
+   * Mengambil ulang isi layar yang sedang dibuka.
+   *
+   * Dipakai dua hal: saat orangnya mengetuk awan, dan saat ada
+   * perubahan dari akun lain. Tiap halaman yang punya load()
+   * memakainya; yang tidak punya dibiarkan apa adanya.
+   */
+  segarkan: function (paksa) {
+    var p = App.pages[App.state.page];
+    if (!p) return;
+
+    try {
+      if (typeof p.load === 'function') p.load(paksa === true);
+      else if (typeof p.muat === 'function') p.muat();
+      else if (paksa) App.go(App.state.page, App.state.param);
+    } catch (e) {}
+  },
+
+  /**
+   * Membuka laci menu, dan menutupnya saat ditekan di luar.
+   *
+   * Sebelumnya laci hanya bisa ditutup lewat tombol Menu lagi —
+   * kebiasaan yang tidak dipakai aplikasi lain, jadi orang menekan
+   * di luar lalu bingung karena tidak terjadi apa-apa.
+   */
+  bukaLaci: function () {
+    var rail = document.getElementById('rail');
+    if (!rail) return;
+
+    rail.classList.add('open');
+    document.body.classList.add('rail-open');
+
+    // Menu yang sudah ada di bawah disembunyikan dari laci
+    if (App.menuLaci && App.menuLaci.length) {
+      rail.querySelectorAll('.rail-nav a[data-k]').forEach(function (a) {
+        a.style.display = App.menuLaci.indexOf(a.dataset.k) >= 0 &&
+                          window.innerWidth <= 760 ? 'none' : '';
+      });
+    }
+
+    setTimeout(function () {
+      document.addEventListener('click', App.tutupLaciLuar);
+    }, 0);
+  },
+
+  tutupLaciLuar: function (e) {
+    var rail = document.getElementById('rail');
+    if (!rail) return;
+    if (e && rail.contains(e.target)) return;
+    if (e && e.target.closest('#tabbar')) return;
+
+    App.tutupLaci();
+  },
+
+  tutupLaci: function () {
+    var rail = document.getElementById('rail');
+    if (rail) rail.classList.remove('open');
+    document.body.classList.remove('rail-open');
+    document.removeEventListener('click', App.tutupLaciLuar);
+  },
+
+  renderShell: function () {
+    var s = App.state.session;
+    var nav = App.susunNav(NAV[s.role] || NAV.SALES);
+
+    document.getElementById('app').innerHTML =
+      '<div class="shell">' +
+        '<aside class="rail" id="rail">' +
+          '<div class="rail-top"><b>' + Fmt.esc(App.state.meta.company) + '</b>' +
+            '<small>' + Fmt.esc(Fmt.branchLabel(s.branch)) + '</small></div>' +
+          '<nav class="rail-nav" id="nav">' + App.navHtml(nav) + '</nav>' +
+          /*
+           * Dasar menu samping dibiarkan kosong.
+           *
+           * Nama dan tombolnya pindah ke sudut kanan atas. Dua
+           * tempat untuk hal yang sama membuat orang ragu mana yang
+           * benar — dan yang di bawah jarang terlihat tanpa
+           * menggulir.
+           */
+        '</aside>' +
+        '<div class="main">' +
+          '<header class="topbar">' +
+            '<button class="burger" id="burger" aria-label="Menu">☰</button>' +
+            '<h1 id="page-title">Beranda</h1><div class="spacer"></div>' +
+
+            /*
+             * Penanda sinkron berbentuk awan.
+             *
+             * Menggantikan garis biru yang berjalan di atas layar —
+             * garis itu menarik mata ke tempat yang tidak ada apa-
+             * apanya, dan bergerak terus walau tidak ada yang perlu
+             * dilihat.
+             *
+             * Awan diam di satu tempat. Yang berubah cuma titik
+             * kecilnya, dan orang hanya meliriknya saat ragu apakah
+             * catatannya sudah tersimpan.
+             */
+            '<button class="awan" id="awan" title="Keadaan sinkron">' +
+              '<svg viewBox="0 0 24 18" width="26" height="20" aria-hidden="true">' +
+                '<path d="M18.5 16H6.2A4.2 4.2 0 0 1 5.6 7.7 6 6 0 0 1 17 6.6' +
+                  'a4.7 4.7 0 0 1 1.5 9.4Z" fill="none" stroke="currentColor" ' +
+                  'stroke-width="1.6" stroke-linejoin="round"/>' +
+              '</svg>' +
+              '<i class="awan-titik" id="awan-titik"></i>' +
+            '</button>' +
+
+            /*
+             * Menu akun dipindah ke kanan atas.
+             *
+             * Dulu tombol Ganti PIN dan Keluar menempel di dasar
+             * menu samping — tempat yang harus dibuka dulu, dan di
+             * HP berarti dua ketukan untuk sesuatu yang jarang
+             * dipakai tapi harus mudah ditemukan saat dibutuhkan.
+             *
+             * Di sudut kanan atas, letaknya sama dengan hampir semua
+             * aplikasi lain. Orang mencarinya di situ tanpa diberi
+             * tahu.
+             */
+            '<div class="akun" id="akun">' +
+              '<button class="akun-tombol" id="akun-tombol">' +
+                '<span class="akun-inisial">' +
+                  Fmt.esc(String(s.full_name || '?').trim().charAt(0).toUpperCase()) +
+                '</span>' +
+                '<span class="akun-nama">' + Fmt.esc(Fmt.roleLabel(s.role)) + '</span>' +
+              '</button>' +
+
+              '<div class="akun-menu" id="akun-menu">' +
+                '<div class="akun-kepala">' +
+                  '<b>' + Fmt.esc(s.full_name) + '</b>' +
+                  '<div class="small muted">' + Fmt.esc(Fmt.roleLabel(s.role)) +
+                    ' · ' + Fmt.esc(Fmt.branchLabel(s.branch)) + '</div>' +
+                '</div>' +
+                '<button class="akun-item" data-a="pin">🔑 Ganti PIN</button>' +
+                '<button class="akun-item" data-a="menu">🧩 Atur Menu</button>' +
+                '<button class="akun-item" data-a="keluar" ' +
+                  'style="color:var(--danger)">↩ Keluar</button>' +
+              '</div>' +
+            '</div>' +
+          '</header>' +
+          '<div class="content" id="view"></div>' +
+        '</div>' +
+
+        /*
+         * Menu bawah untuk layar HP.
+         *
+         * Menu samping memaksa dua ketukan untuk tiap perpindahan —
+         * buka laci dulu, baru pilih. Padahal yang dipakai sepanjang
+         * hari cuma tiga sampai empat menu.
+         *
+         * Yang sering dipakai ditaruh di bawah, dalam jangkauan ibu
+         * jari. Sisanya tetap ada di balik tombol Menu.
+         */
+        '<nav class="tabbar" id="tabbar"></nav>' +
+      '</div>';
+
+    App.renderTabbar(nav);
+
+    /*
+     * Ketuk awan untuk mencoba lagi.
+     *
+     * Saat merah, yang paling sering dilakukan orang adalah memuat
+     * ulang seluruh halaman — padahal cukup mengambil ulang isi
+     * layarnya. Ini memberi jalan yang lebih ringan.
+     */
+    var awan = document.getElementById('awan');
+    if (awan) awan.onclick = function () {
+      Muat.gagal = false;
+      Muat.set('kirim');
+      App.segarkan(true);
+    };
+
+    Muat.set(navigator.onLine ? 'ok' : 'offline');
+
+    document.getElementById('nav').onclick = function (e) {
+      var judul = e.target.closest('.nav-grup-judul');
+      if (judul) {
+        var grup = judul.parentNode;
+        var buka = {};
+        try { buka = JSON.parse(Store.get('els_nav_buka') || '{}'); } catch (e2) {}
+        var nama = grup.dataset.grup;
+        var kini = !grup.classList.contains('buka');
+
+        grup.classList.toggle('buka', kini);
+        var panah = judul.querySelector('.nav-panah');
+        if (panah) panah.textContent = kini ? '▾' : '▸';
+
+        buka[nama] = kini;
+        Store.set('els_nav_buka', JSON.stringify(buka));
+        return;
+      }
+
+      var a = e.target.closest('a'); if (!a) return;
+      if (a.classList.contains('soon')) {
+        toast('Menu ini dibuat pada ' + (a.dataset.ph || 'phase berikutnya') + '.');
+        return;
+      }
+      App.go(a.dataset.k);
+      document.getElementById('rail').classList.remove('open');
+    };
+    document.getElementById('burger').onclick = function () {
+      document.getElementById('rail').classList.toggle('open');
+    };
+    /* ---------- menu akun di kanan atas ---------- */
+    var akun = document.getElementById('akun');
+    var akunTombol = document.getElementById('akun-tombol');
+    var akunMenu = document.getElementById('akun-menu');
+
+    if (akunTombol) akunTombol.onclick = function (e) {
+      e.stopPropagation();
+      akunMenu.classList.toggle('buka');
+    };
+
+    if (akunMenu) akunMenu.onclick = function (e) {
+      var b = e.target.closest('button[data-a]'); if (!b) return;
+      akunMenu.classList.remove('buka');
+
+      if (b.dataset.a === 'pin') App.changePin(false);
+      else if (b.dataset.a === 'menu') App.go('menu');
+      else {
+        Modal.confirm('Keluar dari aplikasi?',
+          'Anda perlu memasukkan PIN lagi untuk masuk.',
+          'Keluar', function () { App.logout(); }, true);
+      }
+    };
+
+    // Ditutup saat menekan di luar — kebiasaan yang sudah umum
+    document.addEventListener('click', function () {
+      if (akunMenu) akunMenu.classList.remove('buka');
+    });
+  },
+
+  /**
+   * Membuka layar lain tanpa kehilangan jejak asalnya.
+   *
+   * Beberapa layar dipakai bersama — isi pesanan dibuka dari
+   * Menunggu Barang, dari Pesanan Saya, dari Cari Pesanan. Tanpa
+   * jejak asal, yang terjadi: orang membuka dari Menunggu Barang,
+   * menu di samping berpindah ke Buat Pesanan, dan tombol kembali
+   * membawanya ke tempat yang bukan asalnya.
+   *
+   * Dengan jejak ini, menu dan judulnya tetap menunjuk tempat
+   * orang itu berada, dan kembali berarti kembali.
+   */
+  bukaDari: function (key, param, asal) {
+    App.state.asal = asal || App.state.page;
+    App.go(key, param);
+  },
+
+  /** Kembali ke layar asal; kalau tidak ada, ke layar cadangan */
+  kembali: function (cadangan) {
+    var asal = App.state.asal;
+    App.state.asal = null;
+    App.go(asal || cadangan || 'home');
+  },
+
+  go: function (key, param) {
+    var page = App.pages[key];
+    if (!page) { toast('Menu belum tersedia.'); return; }
+
+    // Berpindah menu dengan sengaja menghapus jejak asal
+    if (!param && App.state.asal && App.state.asal !== key) App.state.asal = null;
+
+    App.tutupLaci();
+
+    App.state.page = key;
+    App.state.param = param || null;
+    location.hash = '#/' + key + (param ? '/' + encodeURIComponent(param) : '');
+
+    /*
+     * Menu dan judul menunjuk layar asal kalau ada.
+     *
+     * Orang yang membuka isi pesanan dari Menunggu Barang merasa
+     * masih berada di sana — dan memang begitu seharusnya terlihat.
+     */
+    var tampil = (App.state.asal && App.pages[App.state.asal]) ? App.state.asal : key;
+
+    document.querySelectorAll('#nav a').forEach(function (a) {
+      a.classList.toggle('on', a.dataset.k === tampil);
+    });
+    document.getElementById('page-title').textContent =
+      (App.pages[tampil] || page).title || 'Beranda';
+
+    // Menu bawah ikut menunjuk layar yang sedang dibuka
+    document.querySelectorAll('#tabbar a').forEach(function (a) {
+      a.classList.toggle('on', a.dataset.k === tampil);
+    });
+
+    var view = document.getElementById('view');
+    view.innerHTML = page.html(param);
+    if (page.mount) page.mount(view, param);
+  },
+
+  logout: function () {
+    api('apiLogout', {}).catch(function () {}).then(function () {
+      Store.del('els_token');
+      Store.del('els_menu');      // ikut dibuang supaya akun berikutnya bersih
+      App.state.session = null;
+      clearInterval(App._ping);
+      App.renderLogin();
+    });
+  },
+
+  forceLogout: function (msg) {
+    Store.del('els_token');
+    App.state.session = null;
+    clearInterval(App._ping);
+    App.renderLogin();
+    toast(msg || 'Sesi berakhir. Silakan login lagi.', 'err');
+  },
+
+  startPing: function () {
+    clearInterval(App._ping);
+    /*
+     * Menjaga sesi tetap hidup.
+     *
+     * Dijalankan juga saat tab di belakang — kalau tidak, sesi staf
+     * yang meninggalkan aplikasi terbuka akan mati sendiri, dan mereka
+     * harus login ulang tanpa tahu sebabnya.
+     */
+    App._ping = setInterval(function () {
+      api('apiPing', {}).catch(function () {});
+    }, 300000);
+  },
+
+  can: function (perm) {
+    var p = (App.state.session && App.state.session.permissions) || [];
+    return p.indexOf(perm) >= 0;
+  },
+
+  changePin: function (forced) {
+    Modal.open({
+      title: forced ? 'Ganti PIN sebelum mulai' : 'Ganti PIN',
+      sub: forced ? 'PIN Anda dibuatkan oleh Super Admin. Ganti dulu supaya hanya Anda yang tahu.'
+                  : 'Masukkan PIN lama, lalu PIN baru 6 digit.',
+      cancel: !forced,
+      okText: 'Simpan PIN baru',
+      body:
+        '<div class="field"><label>PIN lama</label>' +
+          '<input type="password" id="p-old" inputmode="numeric" maxlength="6" autocomplete="off"></div>' +
+        '<div class="field"><label>PIN baru</label>' +
+          '<input type="password" id="p-new" inputmode="numeric" maxlength="6" autocomplete="off"></div>' +
+        '<div class="field mb0"><label>Ulangi PIN baru</label>' +
+          '<input type="password" id="p-new2" inputmode="numeric" maxlength="6" autocomplete="off">' +
+          '<div class="note">Hindari 123456, tanggal lahir, atau angka berulang.</div></div>',
+      onOk: function (close, btn) {
+        var o = document.getElementById('p-old').value.trim();
+        var n = document.getElementById('p-new').value.trim();
+        var n2 = document.getElementById('p-new2').value.trim();
+        if (n !== n2) return toast('Ulangi PIN belum sama.', 'err');
+
+        btnBusy(btn, true);
+        api('apiChangePin', { oldPin: o, newPin: n }).then(function () {
+          close();
+          App.state.session.must_change_pin = false;
+          toast('PIN berhasil diganti.', 'ok');
+          App.go('home');
+        }).catch(function (e) {
+          btnBusy(btn, false, 'Simpan PIN baru');
+          toast(e.message, 'err');
+        });
+      }
+    });
+  }
+};
+
+/*
+ * Nama barang yang terpotong dibuka dengan satu ketukan.
+ *
+ * Dipasang sekali di tingkat halaman, bukan per tabel — tabelnya
+ * digambar ulang terus-menerus, dan penangan yang menempel di
+ * tiap baris akan hilang tiap kali itu terjadi.
+ */
+document.addEventListener('click', function (e) {
+  var sel = e.target.closest('.table-wrap td');
+  if (!sel) return;
+  if (e.target.closest('button, a, input, select, textarea')) return;
+  if (window.innerWidth > 760) return;
+
+  sel.classList.toggle('lebar');
+});
+
+window.addEventListener('hashchange', function () {
+  if (!App.state.session) return;
+  var h = App.parseHash();
+  if (h.key && (h.key !== App.state.page || h.param !== App.state.param)) App.go(h.key, h.param);
+});
+</script>

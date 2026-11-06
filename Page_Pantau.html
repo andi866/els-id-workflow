@@ -1,0 +1,123 @@
+<script>
+/* ============================================================
+   Pantau Alur
+
+   Menjawab satu pertanyaan saja: pesanan ini sedang di mana.
+
+   Kejadian yang melatarbelakanginya — customer dan barangnya sudah
+   sampai meja Teknisi, tapi transaksinya tidak muncul di antrian
+   karena masih tertahan di Kasir. Tanpa layar ini, yang bisa
+   dilakukan Teknisi cuma menunggu tanpa tahu apa yang ditunggu.
+
+   Ini bukan monitoring penuh seperti milik Admin. Tidak ada harga,
+   tidak ada tombol tindakan. Hanya: siapa yang sedang memegangnya,
+   dan sudah berapa lama.
+   ============================================================ */
+App.pages.pantau = {
+  title: 'Pantau Alur',
+  semua: false,
+
+  html: function () {
+    return '' +
+      '<div class="grid c4" id="pa-stat"></div>' +
+      '<div class="card mt16">' +
+        '<div class="between">' +
+          '<div><h3 class="mb0">Pesanan yang sedang berjalan</h3>' +
+          '<p class="hint mb0">Cari nama customer atau nomor transaksi untuk tahu ' +
+          'sedang di divisi mana.</p></div>' +
+          '<div class="inline">' +
+            '<button class="btn sm ghost" id="pa-semua">Tampilkan yang selesai</button>' +
+            '<button class="btn sm ghost" id="pa-refresh">Muat ulang</button>' +
+          '</div>' +
+        '</div>' +
+        '<input type="text" id="pa-q" class="mt16" ' +
+          'placeholder="Nama customer, nomor transaksi, atau nomor nota…">' +
+      '</div>' +
+      '<div class="mt16" id="pa-list"><div class="empty"><b>Memuat<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.pantau;
+    document.getElementById('pa-refresh').onclick = function () { P.load(); };
+
+    document.getElementById('pa-semua').onclick = function () {
+      P.semua = !P.semua;
+      this.textContent = P.semua ? 'Sembunyikan yang selesai' : 'Tampilkan yang selesai';
+      P.load();
+    };
+    document.getElementById('pa-q').oninput = debounce(function () { P.load(); }, 300);
+    P.load();
+  },
+
+  load: function () {
+    var P = App.pages.pantau;
+    if (!document.getElementById('pa-list')) return;
+    var q = (document.getElementById('pa-q') || {}).value || '';
+
+    apiDaftar('apiPantauAlur', { q: q, semua: P.semua },
+      'pantau:' + q + ':' + P.semua, function (d) {
+      var r = d.rekap;
+      var kotak = document.getElementById('pa-stat');
+      if (kotak) {
+        kotak.innerHTML =
+          '<div class="stat"><b style="color:var(--brand)">' + r.gudang + '</b>' +
+            '<span>Di Gudang</span></div>' +
+          '<div class="stat"><b style="color:var(--warn)">' + r.admin + '</b>' +
+            '<span>Menunggu nota</span></div>' +
+          '<div class="stat"><b style="color:var(--danger)">' + r.kasir + '</b>' +
+            '<span>Menunggu bayar</span></div>' +
+          '<div class="stat"><b style="color:var(--ok)">' + r.teknisi + '</b>' +
+            '<span>Di Teknisi</span></div>';
+      }
+
+      if (!d.list.length) {
+        document.getElementById('pa-list').innerHTML =
+          '<div class="empty"><b>Tidak ada yang sedang berjalan</b>' +
+          (q ? 'Tidak ada yang cocok dengan pencarian Anda.'
+             : 'Semua pesanan sudah tuntas. Tekan "Tampilkan yang selesai" ' +
+               'untuk melihat yang sudah lewat.') + '</div>';
+        return;
+      }
+
+      document.getElementById('pa-list').innerHTML =
+        '<div class="table-wrap"><table><thead><tr>' +
+          '<th>Nomor</th><th>Customer</th><th>Sedang di</th>' +
+          '<th class="kol-opsional">Bayar</th><th class="num">Menunggu</th>' +
+        '</tr></thead><tbody>' +
+        d.list.map(function (t) {
+          var lama = t.menit > 45 && !t.selesai;
+          var diTeknisi = t.stage_status === 'MENUNGGU_AKTIVASI' ||
+                          t.stage_status === 'PROSES_AKTIVASI';
+
+          return '<tr class="row-mark ' +
+            (t.selesai ? 'on' : (lama ? 'off' : (diTeknisi ? 'on' : ''))) + '"' +
+            (t.selesai ? ' style="opacity:.72"' : '') + '>' +
+            '<td><b class="mono">' + Fmt.esc(t.trx_no) + '</b>' +
+              (t.nota_no ? '<div class="small muted">Nota ' + Fmt.esc(t.nota_no) + '</div>' : '') +
+            '</td>' +
+            '<td>' + Fmt.esc(t.cust_name) +
+              '<div class="small muted">Sales ' + Fmt.esc(t.sales_name || '—') +
+              ' · ' + t.item_count + ' item</div></td>' +
+            '<td><b class="small">' + Fmt.esc(t.pemegang) + '</b></td>' +
+            '<td class="kol-opsional">' + Fmt.payBadge(t.payment_status) + '</td>' +
+            '<td class="num' + (lama ? '' : ' muted') + '" style="' +
+              (lama ? 'color:var(--danger)' : '') + '">' +
+              (t.selesai ? Fmt.esc(t.trx_date)
+                : (t.menit >= 60
+                   ? Math.floor(t.menit / 60) + ' jam ' + (t.menit % 60) + ' mnt'
+                   : t.menit + ' menit')) + '</td>' +
+          '</tr>';
+        }).join('') + '</tbody></table></div>' +
+
+        '<p class="hint mt8">Baris merah artinya sudah menunggu lebih dari 45 menit ' +
+        'di divisi itu. Kalau customernya sudah di depan Anda, kabari divisi yang ' +
+        'sedang memegangnya. Mengetik nama atau nomor di kotak pencarian ikut ' +
+        'menampilkan yang sudah selesai.</p>';
+
+    }).catch(function (e) {
+      document.getElementById('pa-list').innerHTML =
+        '<div class="empty"><b>Data tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  }
+};
+</script>

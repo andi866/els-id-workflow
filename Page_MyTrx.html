@@ -1,0 +1,466 @@
+<script>
+/* ============================================================
+   Halaman Daftar Pesanan
+   Sales melihat pesanannya sendiri, Admin melihat semuanya.
+   ============================================================ */
+App.pages.mytrx = {
+  dari: '', sampai: '',
+  title: 'Pesanan',
+  scope: 'today',
+
+  html: function () {
+    var P = App.pages.mytrx;
+    var f = [['today', 'Hari ini'], ['open', 'Masih berjalan'],
+             ['draft', 'Draft'], ['all', 'Semua']];
+
+    var adaPeriode = !!(P.dari || P.sampai);
+
+    /*
+     * Susunannya dibuat bertingkat, bukan berdampingan.
+     *
+     * Di layar HP, deretan tab dan kotak cari yang dipaksa sebaris
+     * saling menindih. Ditumpuk ke bawah dengan urutan yang masuk
+     * akal: pilih tahap dulu, baru mencari, baru mempersempit
+     * tanggal.
+     */
+    return '' +
+      '<div class="card">' +
+        '<div class="inline chips" id="t-filter">' +
+          f.map(function (x) {
+            var aktif = !adaPeriode && x[0] === P.scope;
+            return '<button class="btn sm ' + (aktif ? '' : 'ghost') +
+                   '" data-s="' + x[0] + '">' + x[1] + '</button>';
+          }).join('') +
+          (adaPeriode
+            ? '<button class="btn sm" data-s="periode" disabled>Periode</button>' : '') +
+        '</div>' +
+
+        '<div class="inline mt8" style="flex-wrap:nowrap">' +
+          '<input type="text" id="t-search" placeholder="Cari nomor / nama…" ' +
+            'style="flex:1;min-width:0">' +
+          (App.can('TRX_CREATE')
+            ? '<button class="btn" id="t-new" style="white-space:nowrap">' +
+              'Pesanan baru</button>' : '') +
+        '</div>' +
+
+        '<div class="sep"></div>' +
+        '<div class="inline" style="gap:8px">' +
+          '<input type="date" id="t-dari" title="Dari tanggal" ' +
+            'value="' + (P.dari || '') + '" style="flex:1 1 130px;min-width:0">' +
+          '<input type="date" id="t-sampai" title="Sampai tanggal" ' +
+            'value="' + (P.sampai || '') + '" style="flex:1 1 130px;min-width:0">' +
+          '<button class="btn sm" id="t-periode">Tampilkan</button>' +
+          (adaPeriode
+            ? '<button class="btn sm ghost" id="t-reset">Hapus</button>' : '') +
+        '</div>' +
+        '<div id="t-info" class="mt8"></div>' +
+      '</div>' +
+      '<div class="mt16" id="t-list"><div class="empty"><b>Memuat<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.mytrx;
+
+    document.getElementById('t-filter').onclick = function (e) {
+      var b = e.target.closest('button[data-s]'); if (!b) return;
+
+      // Memilih tahap berarti kembali ke seluruh periode — kalau
+      // tidak, dua penyaring saling menimpa tanpa terlihat
+      P.scope = b.dataset.s;
+      P.dari = ''; P.sampai = '';
+      App.go('mytrx');
+    };
+    var nb = document.getElementById('t-new');
+    if (nb) nb.onclick = function () { App.go('order'); };
+
+    document.getElementById('t-search').oninput = debounce(function (e) {
+      P.draw(e.target.value.trim().toLowerCase());
+    }, 250);
+
+    document.getElementById('t-periode').onclick = function () {
+      P.dari = document.getElementById('t-dari').value;
+      P.sampai = document.getElementById('t-sampai').value;
+      if (!P.dari && !P.sampai) return toast('Isi dulu tanggalnya.', 'err');
+
+      /*
+       * Digambar ulang, bukan sekadar dimuat ulang.
+       *
+       * Kalau hanya datanya yang diambil ulang, deretan tab di atas
+       * masih menyorot "Hari ini" — dan orang membaca itu sebagai
+       * tanda periodenya tidak berlaku, padahal daftarnya sudah
+       * berganti.
+       */
+      P.scope = 'all';
+      App.go('mytrx');
+    };
+
+    var br = document.getElementById('t-reset');
+    if (br) br.onclick = function () {
+      P.dari = ''; P.sampai = '';
+      P.scope = 'today';
+      App.go('mytrx');
+    };
+
+    P.load();
+  },
+
+  load: function () {
+    var P = App.pages.mytrx;
+    api('apiMyTransactions', {
+      scope: P.scope, dari: P.dari || '', sampai: P.sampai || ''
+    }).then(function (rows) {
+      P.data = rows;
+      P.draw('');
+
+      /*
+       * Penanda periode yang sedang berlaku.
+       *
+       * Tanpa ini, memilih tanggal lalu menekan Tampilkan tidak
+       * memberi tanda apa pun kalau kebetulan hasilnya mirip — dan
+       * orang mengira penyaringnya tidak bekerja.
+       */
+      var info = document.getElementById('t-info');
+      if (info) {
+        info.innerHTML = (P.dari || P.sampai)
+          ? '<span class="badge brand">Periode ' +
+            Fmt.esc(P.dari || 'awal') + ' sampai ' +
+            Fmt.esc(P.sampai || 'hari ini') + ' · ' + rows.length + ' pesanan</span>'
+          : '';
+      }
+    }).catch(function (e) {
+      document.getElementById('t-list').innerHTML =
+        '<div class="empty"><b>Data tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  },
+
+  /**
+   * Tanggal sebuah baris, dengan cadangan dari nomor transaksinya.
+   *
+   * Nomor transaksi sudah memuat tanggalnya — TRX-20261024-007.
+   * Dipakai kalau kolom tanggal tidak terkirim, supaya penyaring
+   * periode tetap bekerja tanpa bergantung pada versi server yang
+   * terpasang.
+   */
+  tanggalBaris: function (t) {
+    var tgl = String(t.tanggal || '').trim();
+    if (tgl) return tgl.substring(0, 10);
+    return App.pages.mytrx.tanggalNomor(t) || '';
+  },
+
+  /** Tanggal pesanan dibuat, ditulis singkat: 24 Okt 2026 */
+  tanggalRapi: function (t) {
+    var tgl = App.pages.mytrx.tanggalBaris(t);
+    if (!tgl) return '';
+
+    var bulan = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun',
+                 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+    var p = tgl.split('-');
+    if (p.length !== 3) return tgl;
+
+    return Number(p[2]) + ' ' + (bulan[Number(p[1]) - 1] || p[1]) + ' ' + p[0];
+  },
+
+  /** Tanggal yang tertulis di nomor transaksi, TRX-20261025-046 */
+  tanggalNomor: function (t) {
+    var m = String(t.trx_no || '').match(/(20[0-9]{6})/);
+    if (!m) return '';
+    return m[1].substring(0, 4) + '-' + m[1].substring(4, 6) + '-' + m[1].substring(6, 8);
+  },
+
+  /**
+   * Apakah baris ini masuk rentang tanggal yang dipilih.
+   *
+   * Sebuah pesanan bisa punya dua tanggal: tanggal dibuat, dan
+   * tanggal di nomor transaksinya — yang diambil saat dikonfirmasi.
+   * Pesanan yang dibuat sore lalu dikonfirmasi besoknya punya dua
+   * tanggal yang berbeda.
+   *
+   * Keduanya diperiksa. Lebih baik satu pesanan muncul di dua
+   * tanggal daripada hilang dari keduanya dan dikira belum tercatat.
+   */
+  dalamPeriode: function (t, dari, sampai) {
+    /*
+     * Yang dipakai hanya tanggal pesanan dibuat.
+     *
+     * Sempat saya buat memeriksa dua tanggal — tanggal dibuat dan
+     * tanggal pada nomor transaksi — supaya tidak ada yang hilang.
+     * Itu keliru: hasilnya satu pesanan muncul di dua tanggal, dan
+     * yang membaca jadi ragu mana yang benar.
+     *
+     * Bagi Sales, periode pesanan itu kapan pesanannya dibuat.
+     * Notanya boleh terbit kapan saja setelahnya — dan nomornya
+     * tetap tertulis di baris yang sama.
+     */
+    var tgl = App.pages.mytrx.tanggalBaris(t);
+    if (!tgl) return false;
+    if (dari && tgl < dari) return false;
+    if (sampai && tgl > sampai) return false;
+    return true;
+  },
+
+  /**
+   * Titik perjalanan pesanan: Gudang, Admin, Kasir, Teknisi, Serah.
+   *
+   * Yang sudah lewat berwarna, yang sedang berjalan berdenyut, yang
+   * belum abu-abu. Nama orang yang memegangnya ikut tertulis di
+   * bawah — itu yang paling sering ditanyakan setelah "sampai mana".
+   */
+  jejak: function (t) {
+    var urut = ['MENUNGGU_GUDANG', 'PROSES_GUDANG', 'SIAP_NOTA',
+                'MENUNGGU_PEMBAYARAN', 'MENUNGGU_AKTIVASI', 'PROSES_AKTIVASI',
+                'SIAP_SERAH', 'SELESAI'];
+
+    var titik = [
+      { t: 'Siap',    pada: ['MENUNGGU_GUDANG', 'PROSES_GUDANG'] },
+      { t: 'Nota',    pada: ['SIAP_NOTA'] },
+      { t: 'Bayar',   pada: ['MENUNGGU_PEMBAYARAN'] },
+      { t: 'Kerja',   pada: ['MENUNGGU_AKTIVASI', 'PROSES_AKTIVASI', 'AKTIVASI_SELESAI'] },
+      { t: 'Serah',   pada: ['SIAP_SERAH', 'SELESAI'] }
+    ];
+
+    var st = String(t.stage_status);
+    if (st === 'DRAFT' || st === 'DIBATALKAN' || st === 'MENUNGGU_BARANG') return '';
+
+    var kini = urut.indexOf(st);
+
+    return '<div class="jejak">' +
+      titik.map(function (x) {
+        var di = x.pada.indexOf(st) >= 0;
+        var lewat = !di && kini >= 0 &&
+                    urut.indexOf(x.pada[x.pada.length - 1]) < kini;
+
+        return '<span class="jejak-titik ' +
+          (di ? 'kini' : (lewat ? 'lewat' : '')) + '" title="' + x.t + '"></span>';
+      }).join('') +
+      '</div>';
+  },
+
+  draw: function (q) {
+    var P = App.pages.mytrx;
+
+    var rows = (P.data || []).filter(function (t) {
+      /*
+       * Periode disaring juga di sini.
+       *
+       * Server sudah menyaringnya, tapi penyaring itu baru ada di
+       * versi tertentu — dan kalau berkasnya belum ikut terpasang,
+       * yang terlihat adalah tanggal dipilih tapi daftarnya tidak
+       * berubah. Menyaring sekali lagi di layar membuat hasilnya
+       * benar apa pun keadaan servernya.
+       */
+      if (P.dari || P.sampai) {
+        if (!P.dalamPeriode(t, P.dari, P.sampai)) return false;
+      }
+
+      if (!q) return true;
+      return (t.trx_no + ' ' + t.cust_name + ' ' + t.cust_phone).toLowerCase().indexOf(q) >= 0;
+    });
+
+    if (!rows.length) {
+      document.getElementById('t-list').innerHTML =
+        '<div class="empty"><b>Belum ada pesanan</b>' +
+        (App.can('TRX_CREATE')
+          ? 'Mulai dari tombol Pesanan baru di atas.'
+          : 'Pesanan akan muncul di sini setelah Sales membuatnya.') + '</div>';
+      return;
+    }
+
+    /*
+     * Kolom penanganan untuk semua, bukan hanya online.
+     *
+     * Sales NB juga ditanyai customer — "sudah dikerjakan siapa?",
+     * "sudah sampai Teknisi belum?". Tanpa kolom ini dia harus
+     * membuka transaksinya satu per satu, atau bertanya ke divisi
+     * sebelah untuk hal yang sebenarnya sudah tercatat.
+     *
+     * Kolomnya digambar selama ada isinya di salah satu baris. Kalau
+     * semua pesanan masih di tahap awal dan belum ada yang memegang,
+     * kolomnya tidak muncul dan tabelnya tetap ringkas.
+     */
+
+    document.getElementById('t-list').innerHTML =
+      /*
+       * Kolom tambahan untuk pesanan online.
+       *
+       * Sales Online yang ditanyai customer, jadi dia yang perlu
+       * bisa menjawab tanpa bertanya ke divisi lain dulu: siapa yang
+       * menyiapkan, siapa yang mengantar, perlu faktur atau tidak.
+       *
+       * Kolomnya hanya muncul kalau memang ada isinya — di layar
+       * Sales NB tabelnya tetap seperti semula.
+       */
+      /*
+       * Urutan kolom mengikuti cara orang membacanya.
+       *
+       * Nomor dan customer untuk mengenali, sales untuk tahu
+       * siapa yang menjual, total untuk nilainya, lalu status —
+       * dan siapa yang memegangnya di Gudang dan Teknisi.
+       *
+       * Gudang dan Teknisi dipisah jadi dua kolom, bukan dicampur
+       * dalam satu kolom "penanganan": yang ditanyakan biasanya
+       * salah satunya, bukan keduanya sekaligus.
+       */
+      '<div class="table-wrap"><table><thead><tr>' +
+        '<th>Nomor</th><th>Customer</th>' +
+        '<th class="kol-opsional">Sales</th>' +
+        '<th class="num">Total</th>' +
+        '<th>Status</th>' +
+        '<th class="kol-opsional">Gudang</th>' +
+        '<th class="kol-opsional">Teknisi</th>' +
+        '<th></th>' +
+      '</tr></thead><tbody>' +
+      rows.map(function (t) {
+        return '<tr class="row-mark ' + Fmt.rowMark(t.stage_status) + '" data-id="' + Fmt.esc(t.trx_id) + '">' +
+          /*
+           * Tanggal transaksinya ditampilkan, bukan cuma jamnya.
+           *
+           * Nomor transaksi memakai tanggal saat pesanan
+           * dikonfirmasi, sedangkan tanggal transaksinya adalah saat
+           * pesanan dibuat. Untuk pesanan yang dibuat sore lalu
+           * dikonfirmasi besoknya, keduanya berbeda — dan tanpa
+           * tanggal yang tertulis, penyaring periode terlihat seperti
+           * salah membaca padahal justru benar.
+           */
+          '<td><b class="mono">' + Fmt.esc(t.trx_no) + '</b>' +
+            '<div class="small muted">' +
+              Fmt.esc(App.pages.mytrx.tanggalRapi(t)) + ' · ' +
+              Fmt.esc(Fmt.jamSaja(t.created_at)) + ' · ' +
+              t.item_count + ' item</div>' +
+            (t.nota_no ? '<div class="small muted">Nota ' + Fmt.esc(t.nota_no) + '</div>' : '') +
+            '</td>' +
+          /*
+           * Nama sales ikut di bawah customer pada layar HP.
+           *
+           * Kolom Sales disembunyikan di layar sempit supaya
+           * tabelnya tidak melebar — tapi itu membuat namanya tidak
+           * terlihat sama sekali, padahal justru itu yang dicari
+           * saat mengecek sebuah nomor nota.
+           */
+          '<td>' + Fmt.esc(t.cust_name) +
+            '<div class="small muted">' + Fmt.esc(t.cust_phone) + '</div>' +
+            (t.sales_name
+              ? '<div class="small hp-only" style="color:var(--brand);font-weight:600">' +
+                Fmt.esc(t.sales_name) +
+                (t.sales_code ? ' · ' + Fmt.esc(t.sales_code) : '') + '</div>'
+              : '') +
+          '</td>' +
+          '<td class="small kol-opsional">' + Fmt.esc(t.sales_name) +
+            (t.sales_code
+              ? '<div class="small muted mono">' + Fmt.esc(t.sales_code) + '</div>' : '') +
+          '</td>' +
+
+          '<td class="num mono">' + Fmt.rp(t.grand_total) + '</td>' +
+
+          '<td>' + Fmt.stageBadge(t.stage_status, t.stage_label) +
+            App.pages.mytrx.jejak(t) +
+            '<div class="mt8">' + Fmt.payBadge(t.payment_status) + '</div>' +
+            (t.tempo_hari
+              ? '<div class="small" style="color:var(--warn)">Tempo ' +
+                t.tempo_hari + ' hari</div>' : '') +
+
+            /* Di HP dua kolom terakhir disembunyikan — isinya
+               diringkas di sini supaya tetap terbaca */
+            '<div class="small muted mt8 hp-only">' +
+              (t.pic_nama ? '📦 ' + Fmt.esc(t.pic_nama) : '') +
+              (t.pic_nama && t.teknisi ? ' · ' : '') +
+              (t.teknisi ? '🔧 ' + Fmt.esc(t.teknisi) : '') +
+            '</div>' +
+          '</td>' +
+
+          '<td class="small kol-opsional">' +
+            (t.pic_nama ? Fmt.esc(t.pic_nama) : '<span class="muted">—</span>') +
+            (t.metode_serah
+              ? '<div class="small muted">' + Fmt.esc(t.metode_serah) + '</div>' : '') +
+            (t.driver
+              ? '<div class="small">🛵 ' + Fmt.esc(t.driver) + '</div>' : '') +
+          '</td>' +
+
+          '<td class="small kol-opsional">' +
+            (t.teknisi ? Fmt.esc(t.teknisi) : '<span class="muted">—</span>') +
+            (t.kerja_teknisi
+              ? '<div class="small muted">' + Fmt.esc(t.kerja_teknisi) + '</div>' : '') +
+          '</td>' +
+          '<td><div class="inline" style="flex-wrap:nowrap">' +
+            /*
+             * Yang tidak bisa dibuka cukup dikosongkan.
+             *
+             * Tanda gembok justru menarik perhatian ke sesuatu yang
+             * tidak bisa dilakukan, dan mengundang pertanyaan setiap
+             * hari. Kolom kosong sudah cukup menjelaskan.
+             */
+            (t.bisa_buka === false
+              ? ''
+              : '<button class="btn sm' + (t.bisa_edit ? '' : ' ghost') + ' t-buka">' +
+                (t.bisa_edit ? 'Edit' : 'Lihat') + '</button>') +
+            (t.stage_status === 'DRAFT'
+              ? '<button class="btn sm ghost t-batal" data-id="' + Fmt.esc(t.trx_id) +
+                '" data-no="' + Fmt.esc(t.trx_no) + '" data-item="' + t.item_count +
+                '" style="color:var(--danger)">Batalkan</button>' : '') +
+          '</div></td>' +
+        '</tr>';
+      }).join('') + '</tbody></table></div>';
+
+    document.getElementById('t-list').onclick = function (e) {
+      var batal = e.target.closest('.t-batal');
+      if (batal) {
+        e.stopPropagation();
+        App.pages.mytrx.batalkan(batal);
+        return;
+      }
+      var tr = e.target.closest('tr[data-id]'); if (!tr) return;
+      // Baris tanpa tombol berarti rinciannya memang ditutup
+      if (!tr.querySelector('.t-buka')) return;
+      /*
+       * Dibuka dari Pesanan Saya, jadi kembalinya ke sini juga —
+       * bukan ke layar Buat Pesanan yang tidak pernah dibuka orangnya.
+       */
+      App.bukaDari('order', tr.dataset.id, 'mytrx');
+    };
+  },
+
+  /**
+   * Membatalkan draft yang tidak jadi dipakai.
+   *
+   * Draft kosong dihapus betulan. Draft yang sudah berisi barang
+   * dibatalkan dan tetap tersimpan beserta alasannya — jejak
+   * "pesanan dibuat" sudah terlanjur ada, dan catatan yang menunjuk
+   * ke transaksi hilang lebih membingungkan daripada baris batal.
+   */
+  batalkan: function (b) {
+    var kosong = Number(b.dataset.item) === 0;
+
+    Modal.open({
+      title: kosong ? 'Hapus draft kosong?' : 'Batalkan draft ini?',
+      sub: kosong
+        ? 'Draft ini belum berisi barang apa pun, jadi dihapus sepenuhnya.'
+        : 'Draft beserta barangnya tetap tersimpan dan ditandai batal, ' +
+          'supaya riwayatnya masih bisa ditelusuri.',
+      okText: kosong ? 'Ya, hapus' : 'Ya, batalkan', danger: true,
+      body:
+        '<div class="between"><span class="muted">Nomor</span><b class="mono">' +
+          Fmt.esc(b.dataset.no) + '</b></div>' +
+        '<div class="between mt8"><span class="muted">Isi</span><b>' +
+          (kosong ? 'belum ada barang' : b.dataset.item + ' barang') + '</b></div>' +
+        (kosong ? '' :
+          '<div class="field mt16 mb0"><label>Alasan</label>' +
+          '<input type="text" id="t-alasan" placeholder="contoh: salah input, customer batal"></div>'),
+      onOk: function (close, btn) {
+        var el = document.getElementById('t-alasan');
+        var alasan = el ? el.value.trim() : '';
+        if (!kosong && alasan.length < 3) return toast('Isi alasannya dulu.', 'err');
+
+        btnBusy(btn, true);
+        api('apiBatalkanDraft', { trx_id: b.dataset.id, reason: alasan, idem: uid() })
+          .then(function (r) {
+            close();
+            toast(r.pesan, 'ok');
+            App.pages.mytrx.load();
+          }).catch(function (e) {
+            btnBusy(btn, false, kosong ? 'Ya, hapus' : 'Ya, batalkan');
+            toast(e.message, 'err');
+          });
+      }
+    });
+  }
+};
+</script>

@@ -1,0 +1,305 @@
+<script>
+/* ============================================================
+   SIAP DISERAHKAN
+
+   Untuk pesanan online yang tidak perlu lewat Teknisi. Barangnya
+   sudah disiapkan, notanya sudah terbit, pembayarannya sudah diurus
+   Kasir — tinggal diserahkan.
+
+   Caranya mengikuti yang dipilih Sales Online saat membuat pesanan.
+   Yang dikirim driver atau ekspedisi wajib ada nama driver atau
+   nomor resinya: barang sudah keluar dari toko, dan kalau customer
+   bertanya harus ada yang bisa ditelusuri.
+   ============================================================ */
+App.pages.serah = {
+  title: 'Siap Diserahkan',
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<div class="between">' +
+          '<div><h3 class="mb0">Tinggal diserahkan</h3>' +
+          '<p class="hint mb0">Pesanan online yang tidak lewat Teknisi. ' +
+          'Notanya sudah terbit dan pembayarannya sudah diurus Kasir.</p></div>' +
+          '<button class="btn sm ghost" id="sr-muat" title="Muat ulang">↻</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt16" id="sr-list"><div class="empty"><b>Memuat<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div></div>';
+  },
+
+  mount: function () {
+    document.getElementById('sr-muat').onclick = function () {
+      App.pages.serah.load();
+    };
+    App.pages.serah.load();
+  },
+
+  load: function () {
+    var wadah = document.getElementById('sr-list');
+    if (!wadah) return;
+
+    api('apiSiapSerah', {}).then(function (d) {
+      if (!d.list.length) {
+        wadah.innerHTML = '<div class="empty"><b>Tidak ada yang menunggu</b>' +
+          'Pesanan muncul di sini setelah Kasir selesai dan barangnya ' +
+          'tidak perlu lewat Teknisi.</div>';
+        return;
+      }
+
+      wadah.innerHTML = d.list.map(function (t) {
+        var lama = t.menit > 120;
+        var kirim = String(t.metode_serah).toUpperCase().indexOf('AMBIL') < 0;
+
+        return '<div class="card" style="border-left:4px solid ' +
+            (lama ? 'var(--danger)' : 'var(--ok)') + ';margin-bottom:12px">' +
+          '<div class="between">' +
+            '<div style="min-width:0">' +
+              '<div class="inline">' +
+                Fmt.payBadge(t.payment_status) +
+                '<span class="badge brand">' + Fmt.esc(t.metode_serah) + '</span>' +
+                (t.tempo_hari
+                  ? '<span class="badge warn">Tempo ' + t.tempo_hari + ' hari</span>' : '') +
+              '</div>' +
+
+              '<div style="font-size:18px;font-weight:800;margin-top:4px" class="mono">' +
+                Fmt.esc(t.trx_no) + '</div>' +
+              '<div style="font-size:15px">Atas nama <b>' +
+                Fmt.esc(t.cust_name) + '</b></div>' +
+              '<div class="small muted">' + Fmt.esc(t.cust_phone) +
+                ' · Sales ' + Fmt.esc(t.sales_name || '—') +
+                ' · ' + t.item_count + ' item</div>' +
+              (t.nota_no
+                ? '<div class="small muted">Nota ' + Fmt.esc(t.nota_no) + '</div>' : '') +
+
+              '<div class="small' + (lama ? '' : ' muted') + '" style="' +
+                (lama ? 'color:var(--danger)' : '') + '">' +
+                (t.menit >= 60
+                  ? 'menunggu ' + Math.floor(t.menit / 60) + ' jam ' + (t.menit % 60) + ' menit'
+                  : 'menunggu ' + t.menit + ' menit') + '</div>' +
+
+              (t.outstanding > 0
+                ? '<div class="small mt8" style="color:var(--warn)"><b>Sisa ' +
+                  Fmt.rp(t.outstanding) + '</b> — tempo, bukan tunggakan Kasir.</div>' : '') +
+            '</div>' +
+
+            /*
+             * Isi pesanannya bisa dibuka dulu sebelum diserahkan.
+             *
+             * Beberapa pesanan mirip nomornya dan mirip namanya.
+             * Tanpa cara mengecek isinya, satu-satunya tombol yang
+             * ada adalah tombol yang menuntaskan — dan salah tekan
+             * di situ berarti barang orang lain tercatat sudah
+             * diserahkan.
+             */
+            '<div style="display:flex;flex-direction:column;gap:8px;min-width:170px">' +
+              '<button class="btn sr-go" data-id="' + Fmt.esc(t.trx_id) +
+                '" data-no="' + Fmt.esc(t.trx_no) +
+                '" data-nama="' + Fmt.esc(t.cust_name) +
+                '" data-cara="' + Fmt.esc(t.metode_serah) +
+                '" data-kirim="' + (kirim ? '1' : '') + '">' +
+                (kirim ? 'Serahkan ke kurir' : 'Serahkan ke customer') + '</button>' +
+
+              '<button class="btn ghost sm sr-lihat" data-id="' + Fmt.esc(t.trx_id) +
+                '">Lihat isi pesanan</button>' +
+            '</div>' +
+          '</div></div>';
+      }).join('');
+
+      App.pages.serah.bind();
+
+    }).catch(function (e) {
+      wadah.innerHTML = '<div class="empty"><b>Gagal memuat</b>' +
+        Fmt.esc(e.message) + '</div>';
+    });
+  },
+
+  bind: function () {
+    document.querySelectorAll('.sr-lihat').forEach(function (b) {
+      b.onclick = function () {
+        // Dibuka dalam bentuk baca-saja; kembalinya ke daftar ini
+        App.pages.done.lihat(b.dataset.id, 'serah');
+      };
+    });
+
+    document.querySelectorAll('.sr-go').forEach(function (b) {
+      b.onclick = function () {
+        var kirim = !!b.dataset.kirim;
+
+        Modal.open({
+          title: kirim ? 'Serahkan ke kurir?' : 'Serahkan ke customer?',
+          sub: kirim
+            ? 'Tulis nama driver atau nomor resinya. Barang sudah keluar dari ' +
+              'toko — kalau customer bertanya, ini yang bisa ditelusuri.'
+            : 'Tekan setelah barang benar-benar diterima customer.',
+          okText: 'Ya, sudah diserahkan',
+          body:
+            '<div class="between"><span class="muted">Transaksi</span><b class="mono">' +
+              Fmt.esc(b.dataset.no) + '</b></div>' +
+            '<div class="between mt8"><span class="muted">Customer</span><b>' +
+              Fmt.esc(b.dataset.nama) + '</b></div>' +
+            '<div class="between mt8"><span class="muted">Cara</span><b>' +
+              Fmt.esc(b.dataset.cara) + '</b></div>' +
+
+            (kirim
+              ? '<div class="grid c2 mt16">' +
+                  '<div class="field mb0"><label>Nama driver</label>' +
+                    '<input type="text" id="sr-driver" placeholder="contoh: Eko"></div>' +
+                  '<div class="field mb0"><label>Nomor resi</label>' +
+                    '<input type="text" id="sr-resi" class="mono" ' +
+                    'placeholder="kalau lewat ekspedisi"></div>' +
+                '</div>'
+              : '') +
+
+            '<div class="field mt16 mb0"><label>Catatan (opsional)</label>' +
+              '<input type="text" id="sr-note" ' +
+              'placeholder="contoh: diambil sendiri, KTP dicek"></div>',
+
+          onOk: function (close, btn) {
+            var dr = document.getElementById('sr-driver');
+            var rs = document.getElementById('sr-resi');
+            var nt = document.getElementById('sr-note');
+
+            if (kirim && !(dr && dr.value.trim()) && !(rs && rs.value.trim())) {
+              return toast('Tulis dulu nama driver atau nomor resinya.', 'err');
+            }
+
+            close();
+            b.closest('.card').style.opacity = '.4';
+            toast(b.dataset.no + ' sedang dicatat…', 'ok');
+
+            Latar.simpan('apiSerahEksekusi', {
+              trx_id: b.dataset.id,
+              driver: dr ? dr.value : '',
+              resi: rs ? rs.value : '',
+              catatan: nt ? nt.value : '',
+              idem: uid()
+            }, {
+              judul: 'Penyerahan ' + b.dataset.no,
+              keterangan: 'Buka lagi Siap Diserahkan dan tandai sekali lagi.',
+              berhasil: function (r) {
+                toast(r.trx_no + ' selesai · ' + r.cara, 'ok', '✓ Diserahkan');
+                App.pages.serah.load();
+              }
+            }).catch(function () { App.pages.serah.load(); });
+          }
+        });
+      };
+    });
+  }
+};
+
+/* ============================================================
+   CARI PESANAN
+
+   Pesanan ditanyakan lagi berbulan-bulan kemudian — customer
+   menelepon soal garansi, atau menanyakan pesanan yang dulu.
+
+   Dicari di dua tempat sekaligus: yang masih berjalan di sistem,
+   dan yang sudah dipindah ke berkas arsip harian. Yang bertanya
+   tidak perlu tahu bedanya.
+   ============================================================ */
+App.pages.cari = {
+  title: 'Cari Pesanan',
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<h3>Cari pesanan</h3>' +
+        '<p class="hint">Nama customer, nomor WhatsApp, nomor transaksi, atau ' +
+        'nomor nota. Termasuk pesanan lama yang sudah diarsipkan.</p>' +
+        '<div class="inline">' +
+          '<input type="text" id="cp-q" style="flex:1;min-width:220px" ' +
+            'placeholder="contoh: Budi, 0812…, TRX-…, JL-PWT-…" autocomplete="off">' +
+          '<button class="btn" id="cp-go">Cari</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt16" id="cp-hasil"></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.cari;
+    var k = document.getElementById('cp-q');
+    document.getElementById('cp-go').onclick = function () { P.cari(); };
+    k.onkeydown = function (e) { if (e.key === 'Enter') P.cari(); };
+    k.focus();
+  },
+
+  cari: function () {
+    var q = document.getElementById('cp-q').value.trim();
+    var wadah = document.getElementById('cp-hasil');
+
+    if (q.length < 3) {
+      wadah.innerHTML = '<div class="empty">Ketik minimal 3 huruf.</div>';
+      return;
+    }
+
+    wadah.innerHTML = '<div class="empty">Mencari…</div>';
+
+    api('apiCariPesanan', { q: q }).then(function (d) {
+      if (!d.list.length) {
+        wadah.innerHTML = '<div class="empty"><b>Tidak ditemukan</b>' +
+          'Coba potongan namanya saja, atau nomor WhatsApp-nya.</div>';
+        return;
+      }
+
+      wadah.innerHTML =
+        '<div class="card"><b>' + d.total + ' pesanan ditemukan</b>' +
+          (d.di_arsip
+            ? '<div class="small muted">' + d.di_arsip + ' di antaranya sudah ' +
+              'diarsipkan — rinciannya dibuka lewat tautan.</div>' : '') +
+        '</div>' +
+
+        '<div class="table-wrap mt16"><table><thead><tr>' +
+          '<th>Transaksi</th><th>Customer</th><th>Keadaan</th>' +
+          '<th class="num">Total</th><th style="width:90px"></th>' +
+        '</tr></thead><tbody>' +
+        d.list.map(function (t) {
+          return '<tr' + (t.dibatalkan ? ' style="opacity:.5"' : '') + '>' +
+            '<td><b class="mono small">' + Fmt.esc(t.trx_no) + '</b>' +
+              '<div class="small muted">' + Fmt.esc(t.tanggal) +
+                (t.nota_no ? ' · ' + Fmt.esc(t.nota_no) : '') + '</div></td>' +
+            '<td>' + Fmt.esc(t.cust_name) +
+              '<div class="small muted">' +
+                (t.cust_phone ? Fmt.esc(t.cust_phone) + ' · ' : '') +
+                'Sales ' + Fmt.esc(t.sales_name || '—') + '</div></td>' +
+            '<td>' +
+              (t.arsip
+                ? '<span class="badge">📁 Arsip</span>'
+                : Fmt.stageBadge(t.stage_status, t.stage_label) +
+                  Fmt.payBadge(t.payment_status)) +
+              (t.dibatalkan ? '<div class="small" style="color:var(--danger)">Dibatalkan</div>' : '') +
+            '</td>' +
+            '<td class="num mono">' + Fmt.rp(t.grand_total) + '</td>' +
+            '<td>' +
+              (t.arsip
+                ? (t.tautan
+                   ? '<a class="btn sm ghost" href="' + Fmt.esc(t.tautan) +
+                     '" target="_blank">Buka arsip</a>' : '')
+                : '<button class="btn sm ghost cp-buka" data-id="' +
+                  Fmt.esc(t.trx_id) + '">Lihat</button>') +
+            '</td>' +
+          '</tr>';
+        }).join('') + '</tbody></table></div>';
+
+      document.querySelectorAll('.cp-buka').forEach(function (b) {
+        b.onclick = function () {
+          /*
+           * Dibuka di layar yang sesuai perannya. Sales melihat
+           * layar pesanan, divisi penyiap melihat layar antrian.
+           */
+          var r = App.state.session.role;
+          if (r === 'EKSEKUSI' || r === 'GUDANG') {
+            App.pages.done.lihat(b.dataset.id, 'cari');
+          } else {
+            App.bukaDari('order', b.dataset.id, 'cari');
+          }
+        };
+      });
+
+    }).catch(function (e) {
+      wadah.innerHTML = '<div class="empty"><b>Gagal mencari</b>' +
+        Fmt.esc(e.message) + '</div>';
+    });
+  }
+};
+</script>

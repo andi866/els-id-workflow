@@ -1,0 +1,116 @@
+<script>
+/* ============================================================
+   Tabel barang — satu bentuk untuk semua divisi
+
+   Sebelumnya tiap layar menggambar daftar barangnya sendiri-sendiri,
+   dengan susunan kolom yang berbeda-beda. Akibatnya staf yang pindah
+   divisi harus membaca ulang tata letak yang berbeda untuk data yang
+   sebenarnya sama.
+
+   Sekarang satu fungsi dipakai bersama. Yang berbeda antar divisi
+   hanya kolom mana yang ditampilkan — bukan bentuknya.
+
+   Pemakaian:
+     TabelBarang.render(items, { harga: true, sn: true, total: true })
+   ============================================================ */
+
+var TabelBarang = {
+
+  /**
+   * items : daftar barang. Yang dibaca:
+   *   product_name, product_code, qty, unit_price, master_price,
+   *   line_total, item_note, source, sns (array), need_sn
+   *
+   * opsi:
+   *   harga   - tampilkan kolom harga satuan dan diskon
+   *   total   - tampilkan kolom jumlah dan baris ringkasan di kaki
+   *   sn      - tampilkan serial number di bawah nama barang
+   *   ringkas - baris ringkasan { subtotal, diskon, grand }
+   */
+  render: function (items, opsi) {
+    opsi = opsi || {};
+    if (!items || !items.length) {
+      return '<div class="empty"><b>Belum ada barang</b>Pesanan ini masih kosong.</div>';
+    }
+
+    var kolom =
+      '<th style="width:38px" class="mid">No</th>' +
+      '<th>Produk</th>' +
+      (opsi.harga ? '<th class="num" style="width:120px">Harga Satuan</th>' : '') +
+      (opsi.harga ? '<th class="num" style="width:110px">Diskon</th>' : '') +
+      '<th class="mid" style="width:62px">Qty</th>' +
+      (opsi.total ? '<th class="num" style="width:130px">Total</th>' : '');
+
+    var baris = items.map(function (i, n) {
+      var master = Number(i.master_price) || 0;
+      var harga = Number(i.unit_price) || 0;
+      var qty = Number(i.qty) || 0;
+      // Diskon dihitung dari harga jual yang berlaku, bukan harga katalog
+      var dasar = Number(i.base_price) || master;
+      var potong = dasar > harga ? (dasar - harga) : 0;
+      var jumlah = i.line_total !== undefined ? Number(i.line_total) : qty * harga;
+
+      var sn = '';
+      if (opsi.sn && i.sns && i.sns.length) {
+        var isi = i.sns.filter(function (x) { return String(x || '').trim(); });
+        if (isi.length) {
+          sn = '<div class="brg-sn">' +
+               isi.map(function (x) { return '<span>' + Fmt.esc(x) + '</span>'; }).join('') +
+               '</div>';
+        }
+      } else if (opsi.sn && i.need_sn) {
+        sn = '<div class="brg-sn"><span style="color:var(--warn)">SN belum diisi</span></div>';
+      }
+
+      return '<tr>' +
+        '<td class="mid muted">' + (n + 1) + '</td>' +
+        '<td>' +
+          '<div class="brg-nama">' + Fmt.esc(i.product_name) +
+            (i.source === 'MANUAL'
+              ? ' <span class="badge warn" style="vertical-align:middle">Manual</span>' : '') +
+          '</div>' +
+          '<div class="brg-kode mono">' + Fmt.esc(i.product_code || '—') + '</div>' +
+          sn +
+          (i.item_note ? '<div class="brg-catatan">📝 ' + Fmt.esc(i.item_note) + '</div>' : '') +
+        '</td>' +
+        (opsi.harga
+          ? '<td class="num mono">' + Fmt.rp(harga) +
+            (potong ? '<div class="brg-coret mono">' + Fmt.angka(dasar) + '</div>' : '') + '</td>'
+          : '') +
+        (opsi.harga
+          ? '<td class="num mono"' + (potong ? ' style="color:var(--warn)"' : '') + '>' +
+            (potong ? '−' + Fmt.rp(potong) : '—') + '</td>'
+          : '') +
+        '<td class="mid"><b style="font-size:15px">' + qty + '</b></td>' +
+        (opsi.total ? '<td class="num mono">' + Fmt.rp(jumlah) + '</td>' : '') +
+      '</tr>';
+    }).join('');
+
+    var kaki = '';
+    if (opsi.total && opsi.ringkas) {
+      var r = opsi.ringkas;
+      var lebar = 4 + (opsi.harga ? 2 : 0);
+      var sel = function (label, nilai, kelas) {
+        return '<tr' + (kelas ? ' class="' + kelas + '"' : '') + '>' +
+          '<td colspan="' + (lebar - 1) + '" style="text-align:right">' + label + '</td>' +
+          '<td class="num mono">' + nilai + '</td></tr>';
+      };
+
+      kaki = '<tfoot>' +
+        (r.diskon ? sel('Harga sebelum diskon', Fmt.rp(r.subtotal + r.diskon)) : '') +
+        (r.diskon ? sel('Total diskon', '−' + Fmt.rp(r.diskon)) : '') +
+        sel('TOTAL', Fmt.rp(r.grand), 'total') +
+        (r.terbayar !== undefined && r.terbayar > 0
+          ? sel('Sudah dibayar', Fmt.rp(r.terbayar)) : '') +
+        (r.sisa !== undefined && r.sisa > 0
+          ? sel('<b style="color:var(--danger)">Sisa</b>',
+                '<b style="color:var(--danger)">' + Fmt.rp(r.sisa) + '</b>') : '') +
+      '</tfoot>';
+    }
+
+    return '<div class="tbl-barang">' +
+      '<table><thead><tr>' + kolom + '</tr></thead>' +
+      '<tbody>' + baris + '</tbody>' + kaki + '</table></div>';
+  }
+};
+</script>

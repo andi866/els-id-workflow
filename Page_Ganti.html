@@ -1,0 +1,312 @@
+<script>
+/* ============================================================
+   Ganti Unit Rusak
+
+   Dipakai Gudang dan Admin. Tombol yang muncul menyesuaikan izin:
+   Gudang mengisi SN pengganti, Admin membuat nota penggantinya.
+
+   Keduanya melihat daftar yang sama, jadi tidak perlu saling
+   menanyakan sudah sampai mana.
+   ============================================================ */
+App.pages.ganti = {
+  title: 'Ganti Unit',
+  semua: false,
+
+  html: function () {
+    return '' +
+      '<div class="grid c3" id="gt-stat"></div>' +
+      '<div class="card mt16"><div class="between">' +
+        '<div><h3 class="mb0">Permintaan ganti unit rusak</h3>' +
+        '<p class="hint mb0">Diminta Sales, Admin, atau Teknisi saat menemukan ' +
+        'unit bermasalah. Perhatikan keterangan "Serahkan ke" — unit penggantinya ' +
+        'diberikan ke orang itu.</p></div>' +
+        '<div class="inline">' +
+          '<button class="btn sm ghost" id="gt-semua">Tampilkan yang selesai</button>' +
+          '<button class="btn sm ghost" id="gt-refresh">Muat ulang</button>' +
+        '</div>' +
+      '</div></div>' +
+      '<div class="mt16" id="gt-list"><div class="empty"><b>Memuat<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.ganti;
+
+    document.getElementById('gt-refresh').onclick = function () { P.load(); };
+    document.getElementById('gt-semua').onclick = function () {
+      P.semua = !P.semua;
+      this.textContent = P.semua ? 'Sembunyikan yang selesai' : 'Tampilkan yang selesai';
+      P.load();
+    };
+    P.load();
+  },
+
+  load: function () {
+    var P = App.pages.ganti;
+
+    apiDaftar('apiGantiList', { semua: P.semua }, 'ganti:' + P.semua, function (d) {
+      document.getElementById('gt-stat').innerHTML =
+        '<div class="stat"><b style="color:var(--danger)">' + d.menunggu + '</b>' +
+          '<span>Menunggu Gudang</span></div>' +
+        '<div class="stat"><b style="color:var(--warn)">' + d.siap + '</b>' +
+          '<span>Siap, menunggu diserahkan</span></div>' +
+        '<div class="stat"><b style="color:#7c3aed">' + d.indent + '</b>' +
+          '<span>Menunggu barang datang</span></div>';
+
+      if (!d.list.length) {
+        document.getElementById('gt-list').innerHTML =
+          '<div class="empty"><b>Tidak ada permintaan ganti</b>' +
+          'Permintaan muncul di sini kalau Teknisi menemukan unit rusak saat aktivasi.</div>';
+        return;
+      }
+
+      document.getElementById('gt-list').innerHTML = d.list.map(function (g) {
+        var warna = g.status === 'MENUNGGU' ? 'var(--danger)'
+                  : (g.status === 'INDENT' ? '#7c3aed'
+                  : (g.status === 'SELESAI' ? 'var(--ok)' : 'var(--warn)'));
+
+        var tombol = '';
+        if (g.status === 'MENUNGGU' || g.status === 'INDENT') {
+          if (App.can('SN_INPUT')) {
+            tombol += '<button class="btn gt-siap" data-id="' + Fmt.esc(g.id) +
+              '" data-trx="' + Fmt.esc(g.trx_id) + '">Siapkan &amp; isi SN</button>';
+          }
+          if (App.can('SN_INPUT') && g.status === 'MENUNGGU') {
+            tombol += '<button class="btn ghost sm gt-indent" data-id="' + Fmt.esc(g.id) +
+              '" data-trx="' + Fmt.esc(g.trx_id) + '">Stok kosong</button>';
+          }
+        }
+        if ((g.status === 'SIAP' || g.status === 'NOTA') && App.can('NOTA_INPUT')) {
+          tombol += '<button class="btn ' + (g.nota_ganti ? 'ghost ' : '') + 'gt-nota" data-id="' +
+            Fmt.esc(g.id) + '" data-trx="' + Fmt.esc(g.trx_id) + '">' +
+            (g.nota_ganti ? 'Ubah nota pengganti' : 'Buat nota pengganti') + '</button>';
+        }
+
+        /*
+         * Menutup sendiri kalau Teknisi lupa.
+         *
+         * Barangnya sudah diserahkan, tapi permintaannya tetap berdiri
+         * di daftar ini seolah masih ada yang harus dikerjakan. Yang
+         * menyiapkan barangnya juga tahu kalau sudah selesai, jadi
+         * tidak masuk akal kalau hanya Teknisi yang bisa menutupnya.
+         */
+        // Form rusak bisa dicetak ulang kapan saja selama
+        // permintaannya masih tercatat
+        tombol += '<div><button class="btn sm ghost gt-form" data-id="' + Fmt.esc(g.id) +
+          '" data-trx="' + Fmt.esc(g.trx_id) + '" style="margin-top:6px">' +
+          '🖨 Form rusak</button></div>';
+
+        if (g.status === 'SIAP' || g.status === 'NOTA') {
+          tombol += '<div><button class="btn sm ghost gt-tutup" data-id="' + Fmt.esc(g.id) +
+            '" data-trx="' + Fmt.esc(g.trx_id) + '" data-nama="' +
+            Fmt.esc(g.product_name) + '" style="margin-top:6px">Tandai sudah selesai</button></div>';
+        }
+
+        return '<div class="card" style="margin-bottom:12px;border-left:5px solid ' + warna + '">' +
+          '<div class="between">' +
+            '<div style="flex:1;min-width:220px">' +
+              '<div class="inline" style="margin-bottom:5px">' +
+                '<span class="badge" style="background:' +
+                  (g.status === 'MENUNGGU' ? 'var(--danger-soft);color:var(--danger)'
+                   : (g.status === 'INDENT' ? '#EDE7FD;color:#5B21B6'
+                   : (g.status === 'SELESAI' ? 'var(--ok-soft);color:var(--ok)'
+                   : 'var(--warn-soft);color:var(--warn)'))) + '">' +
+                  Fmt.esc(g.status_label) + '</span>' +
+                (g.status === 'MENUNGGU' && g.menit > 30
+                  ? '<span class="badge danger">⏱ ' + g.menit + ' menit</span>'
+                  : '<span class="badge">' + g.menit + ' menit lalu</span>') +
+              '</div>' +
+
+              '<div style="font-size:17px;font-weight:800">' +
+                Fmt.esc(g.product_name) + '</div>' +
+              '<div class="small muted">' + Fmt.esc(g.product_code) +
+                ' · unit ke-' + g.unit_seq + '</div>' +
+
+              '<div class="small mt8">' +
+                '<b class="mono">' + Fmt.esc(g.trx_no) + '</b> · ' +
+                Fmt.esc(g.cust_name) +
+                (g.nota_no ? ' · Nota ' + Fmt.esc(g.nota_no) : '') + '</div>' +
+
+              '<div class="small mt8" style="background:var(--danger-soft);color:var(--danger);' +
+                'padding:7px 10px;border-radius:8px">' +
+                '<b>Keluhan:</b> ' + Fmt.esc(g.alasan) + '</div>' +
+
+              (g.sn_lama
+                ? '<div class="small mono mt8">SN rusak: ' + Fmt.esc(g.sn_lama) + '</div>' : '') +
+              (g.sn_baru
+                ? '<div class="small mono" style="color:var(--ok)">SN pengganti: ' +
+                  Fmt.esc(g.sn_baru) + '</div>' : '') +
+              (g.indent_note
+                ? '<div class="small mt8" style="color:#5B21B6">📦 ' +
+                  Fmt.esc(g.indent_note) + '</div>' : '') +
+              (g.nota_ganti
+                ? '<div class="small mt8">🧾 Nota pengganti: <b class="mono">' +
+                  Fmt.esc(g.nota_ganti) + '</b></div>' : '') +
+
+              /*
+               * Keterangan paling penting untuk Gudang: unit
+               * penggantinya diserahkan ke siapa.
+               *
+               * Dulu alur ini cuma dipakai Teknisi, jadi tidak perlu
+               * ditulis. Sekarang Sales dan Admin juga bisa meminta —
+               * dan tanpa ini Gudang menyiapkan unitnya lalu bingung
+               * mau dibawa ke mana.
+               */
+              (g.serahkan_ke
+                ? '<div class="mt8" style="background:var(--brand-soft);color:var(--brand);' +
+                  'padding:7px 11px;border-radius:8px;display:inline-block">' +
+                  '<b class="small">Serahkan ke ' + Fmt.esc(g.serahkan_ke) +
+                  (g.serahkan_divisi ? ' · ' + Fmt.esc(g.serahkan_divisi) : '') + '</b></div>'
+                : '') +
+
+              '<div class="small muted mt8">Diminta ' + Fmt.esc(g.minta_by) +
+                (g.serahkan_divisi ? ' (' + Fmt.esc(g.serahkan_divisi) + ')' : '') +
+                (g.gudang_by ? ' · disiapkan ' + Fmt.esc(g.gudang_by) : '') + '</div>' +
+            '</div>' +
+            '<div style="text-align:right">' + tombol + '</div>' +
+          '</div></div>';
+      }).join('');
+
+      P.bind();
+    }).catch(function (e) {
+      document.getElementById('gt-list').innerHTML =
+        '<div class="empty"><b>Data tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  },
+
+  bind: function () {
+    var P = App.pages.ganti;
+
+    document.querySelectorAll('.gt-siap').forEach(function (b) {
+      b.onclick = function () {
+        Modal.open({
+          title: 'Unit pengganti sudah disiapkan?',
+          sub: 'Isi serial number unit penggantinya. SN yang lama otomatis ' +
+               'dinonaktifkan dan digantikan yang ini.',
+          okText: 'Ya, sudah siap',
+          body:
+            '<div class="field"><label>Serial number unit pengganti</label>' +
+              '<input type="text" id="gt-sn" class="mono" ' +
+              'placeholder="pindai atau ketik SN unit baru"></div>' +
+            '<div class="note">Kosongkan kalau barangnya memang tidak ber-SN.</div>',
+          onOk: function (close, btn) {
+            var sn = document.getElementById('gt-sn').value;
+            close();
+            toast('Unit pengganti ditandai siap…', 'ok');
+
+            Latar.simpan('apiGantiSiap', {
+              trx_id: b.dataset.trx, ganti_id: b.dataset.id,
+              sn_baru: sn, idem: uid()
+            }, {
+              judul: 'Unit pengganti siap',
+              keterangan: 'Buka lagi Ganti Unit, lalu tekan Siapkan & isi SN.',
+              berhasil: function (r) {
+                toast(r.pesan, 'ok', '✓ Admin sudah diberi tahu');
+                P.load();
+              }
+            }).catch(function () {});
+          }
+        });
+      };
+    });
+
+    document.querySelectorAll('.gt-indent').forEach(function (b) {
+      b.onclick = function () {
+        Modal.open({
+          title: 'Stok penggantinya kosong?',
+          sub: 'Permintaan ini ditandai menunggu barang datang. Teknisi, Admin, ' +
+               'dan Sales diberi tahu supaya bisa mengabari customer.',
+          okText: 'Ya, tandai menunggu barang',
+          body: '<div class="field mb0"><label>Keterangan (boleh dikosongkan)</label>' +
+                '<input type="text" id="gt-indentnote" ' +
+                'placeholder="contoh: dipesan dari cabang Solo"></div>',
+          onOk: function (close, btn) {
+            var el = document.getElementById('gt-indentnote');
+            btnBusy(btn, true);
+            api('apiGantiIndent', {
+              trx_id: b.dataset.trx, ganti_id: b.dataset.id,
+              catatan: el ? el.value : '', idem: uid()
+            }).then(function (r) {
+              close(); toast(r.pesan, 'ok'); P.load();
+            }).catch(function (e) {
+              btnBusy(btn, false, 'Ya, tandai menunggu barang');
+              toast(e.message, 'err');
+            });
+          }
+        });
+      };
+    });
+
+    document.querySelectorAll('.gt-form').forEach(function (b) {
+      b.onclick = function () {
+        FormRusak.ambilLaluCetak(b.dataset.trx, b.dataset.id, b, '🖨 Form rusak')
+          .catch(function () {});
+      };
+    });
+
+    document.querySelectorAll('.gt-tutup').forEach(function (b) {
+      b.onclick = function () {
+        Modal.open({
+          title: 'Tandai permintaan ini selesai?',
+          sub: 'Dipakai kalau unit penggantinya sudah diserahkan tapi Teknisi ' +
+               'lupa menutupnya. Permintaan keluar dari daftar ini.',
+          okText: 'Ya, sudah selesai',
+          body:
+            '<div class="between"><span class="muted">Barang</span><b>' +
+              Fmt.esc(b.dataset.nama) + '</b></div>' +
+            '<div class="field mt16 mb0"><label>Catatan (boleh dikosongkan)</label>' +
+              '<input type="text" id="gt-tutupnote" ' +
+              'placeholder="contoh: sudah diserahkan tanggal 23"></div>',
+          onOk: function (close, btn) {
+            var el = document.getElementById('gt-tutupnote');
+            var cat = el ? el.value : '';
+            close();
+            toast('Permintaan ditandai selesai.', 'ok');
+
+            Latar.simpan('apiGantiTutup', {
+              trx_id: b.dataset.trx, ganti_id: b.dataset.id,
+              catatan: cat, idem: uid()
+            }, {
+              judul: 'Tutup permintaan ganti',
+              keterangan: 'Buka lagi Ganti Unit dan tandai selesai sekali lagi.',
+              berhasil: function () { P.load(); }
+            }).catch(function () {});
+          }
+        });
+      };
+    });
+
+    document.querySelectorAll('.gt-nota').forEach(function (b) {
+      b.onclick = function () {
+        Modal.open({
+          title: 'Nota pengganti',
+          sub: 'Nomor nota dari sistem kantor untuk unit penggantinya. ' +
+               'Tidak lewat Kasir — tidak ada uang yang berpindah.',
+          okText: 'Simpan nomor nota',
+          body: '<div class="field mb0"><label>Nomor nota pengganti</label>' +
+                '<input type="text" id="gt-notano" class="mono" ' +
+                'placeholder="ketik nomor dari nota pengganti"></div>',
+          onOk: function (close, btn) {
+            var el = document.getElementById('gt-notano');
+            if (!el || el.value.trim().length < 3) return toast('Nomor nota belum diisi.', 'err');
+            var nomor = el.value;
+            close();
+            toast('Nota pengganti ' + nomor + ' disimpan.', 'ok');
+
+            Latar.simpan('apiGantiNota', {
+              trx_id: b.dataset.trx, ganti_id: b.dataset.id,
+              nota_ganti: nomor, idem: uid()
+            }, {
+              judul: 'Nota pengganti ' + nomor,
+              keterangan: 'Buka lagi Ganti Unit, lalu isikan nomor notanya.',
+              berhasil: function () {
+                toast('Teknisi sudah diberi tahu.', 'ok', '✓ Nota pengganti');
+                P.load();
+              }
+            }).catch(function () {});
+          }
+        });
+      };
+    });
+  }
+};
+</script>

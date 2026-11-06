@@ -1,0 +1,662 @@
+<script>
+/**
+ * Membuang semua aturan cetak sebelum memasang yang baru.
+ *
+ * Setiap pencetak menyembunyikan seluruh isi halaman kecuali areanya
+ * sendiri. Kalau aturan lama masih menempel, area yang baru ikut
+ * disembunyikan — dan yang keluar dari printer kertas kosong.
+ */
+function bersihkanGayaCetak_() {
+  ['gaya-cetak', 'gaya-etc', 'gaya-resep'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.remove();
+  });
+  ['cetak-area', 'etc-area', 'resep-area'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.innerHTML = '';
+  });
+}
+
+/* ============================================================
+   Cetak Resep Barang
+
+   Dipakai Sales dan Admin. Dicetak di kertas sisa yang dirapikan,
+   jadi yang diutamakan hemat panjang — bukan tampilan.
+
+   Tidak ada kop toko, tidak ada kolom nomor nota, tidak ada kolom
+   tanda tangan. Keterangan ditulis berpasangan kiri-kanan supaya
+   tidak turun ke bawah tanpa perlu.
+   ============================================================ */
+
+var Resep = {
+
+  /* Ukuran kertas resep, dalam milimeter.
+     Kertas sisa yang dirapikan: 11 cm lebar, 14 cm panjang.
+     Kalau suatu saat ukurannya berubah, cukup dua angka ini. */
+  lebar: 110,
+  tinggi: 140,
+  marginKiri: 4,
+  marginAtas: 4,
+
+  /*
+   * Ukuran kertas bisa ditentukan pemanggil.
+   *
+   * Resep dan Form Unit Rusak memakai mesin cetak yang sama, tapi
+   * isinya jauh berbeda. Resep memuat daftar barang yang bisa
+   * panjang; form rusak cuma satu barang, satu SN, dan dua tanda
+   * tangan. Memaksa keduanya seukuran berarti salah satunya selalu
+   * terlalu besar.
+   */
+  siapkanGaya: function (lebar, tinggi) {
+    bersihkanGayaCetak_();
+
+    var lb = lebar || Resep.lebar;
+    var tg = tinggi || Resep.tinggi;
+
+    var st = document.createElement('style');
+    st.id = 'gaya-resep';
+    st.textContent =
+      '@media print {' +
+        '@page { size: ' + lb + 'mm ' + tg + 'mm; ' +
+          'margin: ' + Resep.marginAtas + 'mm ' + Resep.marginKiri + 'mm; }' +
+        'body > *:not(#resep-area) { display: none !important; }' +
+        '#resep-area { display: block !important; position: static !important; }' +
+      '}' +
+      '#resep-area { display: none; }' +
+      '@media print { #resep-area, #resep-area * { margin-left:0 !important } ' +
+      'html, body { margin:0 !important; padding:0 !important } }';
+    document.head.appendChild(st);
+  },
+
+  cetak: function (d) {
+    Resep.siapkanGaya();
+
+    var area = document.getElementById('resep-area');
+    if (!area) {
+      area = document.createElement('div');
+      area.id = 'resep-area';
+      document.body.appendChild(area);
+    }
+
+    area.innerHTML = Resep.html(d);
+    setTimeout(function () {
+      try { window.print(); }
+      catch (e) { toast('Browser menolak membuka jendela cetak.', 'err'); }
+    }, 250);
+  },
+
+  html: function (d) {
+    var t = d.header;
+    var isi = Resep.lebar - (Resep.marginKiri * 2);   // lebar bersih kertas
+
+    // Dua keterangan per baris, kiri dan kanan, masing-masing separuh lebar
+    var pasangan = function (kiriL, kiriV, kananL, kananV) {
+      return '<tr>' +
+        '<td style="padding:0.6mm 0;width:15mm;vertical-align:top;font-weight:700">' +
+          kiriL + '</td>' +
+        '<td style="padding:0.6mm 2mm 0.6mm 0;vertical-align:top">' + kiriV + '</td>' +
+        '<td style="padding:0.6mm 0;width:14mm;vertical-align:top;font-weight:700">' +
+          kananL + '</td>' +
+        '<td style="padding:0.6mm 0;vertical-align:top">' + kananV + '</td>' +
+      '</tr>';
+    };
+
+    // Barang: nama memenuhi lebar, jumlah dan harga di baris bawahnya
+    var barang = d.items.map(function (i) {
+      var sn = i.sns && i.sns.length
+        ? '<div style="font-size:8pt;color:#333">SN: ' + i.sns.map(Fmt.esc).join(', ') + '</div>'
+        : '';
+      var cat = i.item_note
+        ? '<div style="font-size:8pt;font-style:italic;color:#333">' +
+          Fmt.esc(i.item_note) + '</div>' : '';
+
+      /*
+       * Barang berdiskon menampilkan tiga angka: harga sebelum diskon,
+       * potongannya, lalu yang dibayar.
+       *
+       * Resep sering dipakai sebagai lampiran saat diperiksa. Kalau
+       * hanya harga akhir yang tercetak, tidak ada cara membedakan
+       * barang yang memang murah dari barang yang diberi potongan besar.
+       */
+      var dasar = Number(i.base_price) || Number(i.master_price) || 0;
+      var potong = Number(i.diskon) || (dasar > Number(i.unit_price)
+        ? dasar - Number(i.unit_price) : 0);
+
+      // Satu baris saja. Harga akhirnya sudah tercetak di kolom kanan,
+      // jadi menuliskannya lagi cuma memanjangkan kertas.
+      var rincianHarga = '<div style="font-size:8pt;color:#333">' +
+        i.qty + ' x ' + Fmt.rp(potong > 0 ? dasar : i.unit_price) +
+        (potong > 0 ? '<span style="margin-left:4mm">diskon ' + Fmt.rp(potong) + '</span>' : '') +
+        '</div>';
+
+      return '<tr>' +
+        '<td style="padding:0.7mm 0;border-bottom:1px dashed #999;vertical-align:top">' +
+          '<div style="font-weight:700;line-height:1.2;font-size:8.5pt">' +
+            Fmt.esc(i.product_name) + '</div>' +
+          rincianHarga + sn + cat +
+        '</td>' +
+        '<td style="padding:0.7mm 0;border-bottom:1px dashed #999;vertical-align:top;' +
+          'text-align:right;white-space:nowrap;font-weight:700;font-size:9pt;width:25mm">' +
+          Fmt.rp(i.line_total) +
+        '</td>' +
+      '</tr>';
+    }).join('');
+
+    return '' +
+    '<div style="width:' + isi + 'mm;margin:0;font-family:Arial,Helvetica,sans-serif;' +
+      'font-size:9pt;color:#000;line-height:1.22">' +
+
+      // Judul di kiri, tanggal kecil di kanan — sebaris, hemat tempat
+      '<table style="width:100%;border-collapse:collapse;' +
+        'border-bottom:2px solid #000;padding-bottom:1mm;margin-bottom:1.8mm">' +
+        '<tr>' +
+          '<td style="font-weight:800;font-size:12pt;letter-spacing:1.2px;padding:0 0 1.2mm">' +
+            (t.pratinjau ? 'PRATINJAU PESANAN'
+              : (t.indent ? 'RESEP INDENT' : 'RESEP BARANG')) +
+            (t.tempo_hari ? ' · TEMPO ' + t.tempo_hari + ' HARI' : '') + '</td>' +
+          '<td style="text-align:right;font-size:8.5pt;padding:0 0 1.2mm;vertical-align:bottom">' +
+            Fmt.esc(t.trx_date) + '</td>' +
+        '</tr>' +
+      '</table>' +
+
+      '<table style="width:100%;border-collapse:collapse;font-size:9pt;margin-bottom:1.8mm">' +
+        pasangan('No. Trx', '<b>' + Fmt.esc(t.trx_no) + '</b>',
+                 'Nama', Fmt.esc(t.cust_name)) +
+        pasangan('Member', Fmt.esc(t.cust_member || '-'),
+                 'Sales', Fmt.esc(t.sales_name || '-')) +
+
+        /*
+         * Keterangan khusus pesanan online.
+         *
+         * Resep dibawa bersama barangnya. Kalau tempo dan faktur
+         * pajak hanya tertulis di layar, yang memegang barang di
+         * jalan tidak tahu — dan pertanyaannya harus ditelusuri
+         * ulang dari awal.
+         */
+        /*
+         * Penyiap dan cara bayar sejajar.
+         *
+         * Dua hal yang paling sering ditanyakan saat barangnya sudah
+         * di jalan: siapa yang menyiapkan, dan pembayarannya
+         * bagaimana. Ditaruh berdampingan supaya terbaca sekaligus.
+         */
+        /*
+         * Cara bayar, dengan cadangan kalau belum sempat tercatat.
+         *
+         * Pesanan yang dibuat sebelum pilihan ini ada tidak punya
+         * keterangan cara bayarnya — tapi nominal DP-nya ada. Dari
+         * situ bisa disimpulkan, daripada mencetak tanda strip yang
+         * membuat orang mengira DP-nya tidak masuk.
+         */
+        /*
+         * Yang dicetak adalah pilihan Sales, apa adanya.
+         *
+         * Sales Online yang memegang bukti transfernya, jadi dialah
+         * yang paling tahu keadaan pembayaran saat pesanan dibuat.
+         * Kasir tetap memvalidasi setelahnya — itu urusan alur, bukan
+         * urusan resep.
+         *
+         * Sempat saya buat membaca riwayat pembayaran dan mencetak
+         * "Belum bayar" selama Kasir belum mencatat. Itu keliru:
+         * pesanan yang buktinya sudah di tangan Sales jadi tercetak
+         * belum bayar, dan yang membaca di lapangan bingung.
+         */
+        pasangan('Penyiapan', Fmt.esc(t.penyiap || '-'),
+                 'Pembayaran', Fmt.esc((function () {
+                   if (t.tempo_hari) {
+                     return 'Tempo ' + t.tempo_hari + ' hari' +
+                       (t.tempo_jatuh ? ' · jatuh ' + t.tempo_jatuh : '');
+                   }
+
+                   var cb = String(t.cara_bayar || '').toUpperCase();
+
+                   if (cb === 'DP') {
+                     var nominal = Number(t.dp_info) || Number(t.paid_total) || 0;
+                     return 'DP' + (nominal ? ' ' + Fmt.rp(nominal) : '');
+                   }
+
+                   if (cb === 'LUNAS') return 'Lunas';
+                   if (cb) return cb.charAt(0) + cb.slice(1).toLowerCase().replace(/_/g, ' ');
+
+                   /*
+                    * Pesanan lama tidak punya pilihan ini. Dibaca dari
+                    * riwayat pembayarannya, bukan ditebak.
+                    */
+                   if (String(t.payment_status).toUpperCase() === 'LUNAS') return 'Lunas';
+                   if (Number(t.paid_total) > 0) return 'DP ' + Fmt.rp(t.paid_total);
+                   return '-';
+                 })())) +
+
+        (String(t.channel) === 'ONLINE'
+          ? pasangan('Kirim', Fmt.esc(t.metode_serah || '-'),
+                     'Asal', Fmt.esc(t.sumber || '-'))
+          : '') +
+      '</table>' +
+
+      (t.faktur_pajak
+        ? '<div style="border:1px dashed #000;padding:1.2mm 2mm;margin-bottom:1.8mm;' +
+          'font-size:8.5pt;text-align:center"><b>MINTA FAKTUR PAJAK</b></div>'
+        : '') +
+
+      '<table style="width:100%;border-collapse:collapse;font-size:8.5pt;' +
+        'border-top:2px solid #000">' + barang + '</table>' +
+
+      (function () {
+        var totalDiskon = 0;
+        d.items.forEach(function (x) {
+          var b = Number(x.base_price) || Number(x.master_price) || 0;
+          var p2 = Number(x.diskon) || (b > Number(x.unit_price) ? b - Number(x.unit_price) : 0);
+          totalDiskon += p2 * (Number(x.qty) || 0);
+        });
+
+        return '<table style="width:100%;border-collapse:collapse;margin-top:1mm;' +
+          'border-top:2px solid #000">' +
+          (totalDiskon > 0
+            ? '<tr style="font-size:8.5pt">' +
+                '<td style="padding:0.8mm 0">Harga sebelum diskon</td>' +
+                '<td style="padding:0.8mm 0;text-align:right">' +
+                  Fmt.rp(Number(t.grand_total) + totalDiskon) + '</td></tr>' +
+              '<tr style="font-size:8.5pt">' +
+                '<td style="padding:0.8mm 0">Total diskon</td>' +
+                '<td style="padding:0.8mm 0;text-align:right">&minus;' +
+                  Fmt.rp(totalDiskon) + '</td></tr>'
+            : '') +
+          '<tr style="font-size:12pt;font-weight:800">' +
+            '<td style="padding:1.5mm 0">TOTAL</td>' +
+            '<td style="padding:1.5mm 0;text-align:right">' + Fmt.rp(t.grand_total) + '</td>' +
+          '</tr>' +
+        '</table>';
+      })() +
+
+      (t.order_note
+        ? '<div style="font-size:8.5pt;margin-top:1.5mm;padding-top:1mm;' +
+          'border-top:1px dashed #999"><b>Ket:</b> ' + Fmt.esc(t.order_note) + '</div>' : '') +
+
+      (t.pratinjau
+        ? '<div style="border:1px dashed #000;padding:1.2mm 2mm;margin-top:1.5mm;' +
+          'font-size:7.5pt;text-align:center">Pesanan belum dikonfirmasi — ' +
+          'barang belum disiapkan dan nomor transaksi belum terbit.</div>'
+        : '') +
+
+      '<div style="font-size:7.5pt;color:#555;text-align:center;margin-top:2mm">' +
+        Fmt.esc(t.dicetak_oleh) +
+        (t.print_count > 1 ? ' &middot; cetakan ke-' + t.print_count : '') +
+      '</div>' +
+    '</div>';
+  },
+
+  /** Mengambil datanya dari server lalu langsung mencetak */
+  /**
+   * Mencetak resep sambil menandai siapa yang mengambil pesanannya.
+   *
+   * Resep yang keluar dari printer adalah tanda bahwa pesanan itu
+   * sudah dipegang seseorang. Tanpa nama, Sales yang menanyakan
+   * kabarnya tidak tahu harus bertanya ke siapa — dan dua orang bisa
+   * sama-sama mengerjakannya.
+   *
+   * Dipakai di dua tempat: daftar Cetak Resep dan kartu pesanan
+   * indent di antrian.
+   */
+  cetakDenganPic: function (trxId, tombol, labelAwal, sesudah) {
+    var lanjut = function () {
+      return Resep.ambilLaluCetak(trxId, tombol, labelAwal)
+        .then(function () { if (sesudah) setTimeout(sesudah, 1200); })
+        .catch(function () {});
+    };
+
+    var peran = App.state.session.role;
+    if (peran !== 'GUDANG' && peran !== 'EKSEKUSI') return lanjut();
+
+    api('apiListPetugasGudang', {}).then(function (daftar) {
+      if (!daftar.length) return lanjut();
+
+      var ingat = Store.get('els_petugas_gudang');
+
+      Modal.open({
+        title: 'Siapa yang mengambil pesanan ini?',
+        sub: 'Namanya tercatat di resep dan terlihat oleh Sales, supaya jelas ' +
+             'siapa yang meneruskannya ke Admin.',
+        okText: '💾 Simpan & cetak resep',
+        body: '<div class="field mb0"><label>Penanggung jawab</label>' +
+          '<select id="rp-pic">' +
+            '<option value="">— pilih nama —</option>' +
+            daftar.map(function (x) {
+              return '<option value="' + Fmt.esc(x.gudang_code) + '"' +
+                (x.gudang_code === ingat ? ' selected' : '') + '>' +
+                Fmt.esc(x.gudang_name) + '</option>';
+            }).join('') +
+          '</select>' +
+          '<div class="note">Nama ini langsung tersimpan saat tombol di bawah ' +
+          'ditekan, dan muncul di daftar Menunggu Barang.</div></div>',
+        onOk: function (close) {
+          var sel = document.getElementById('rp-pic');
+          if (!sel || !sel.value) return toast('Pilih dulu namanya.', 'err');
+
+          Store.set('els_petugas_gudang', sel.value);
+          close();
+
+          /*
+           * Namanya disimpan dulu, baru resepnya diambil — supaya
+           * nama itu ikut tercetak di kertasnya.
+           */
+          var nama = sel.options[sel.selectedIndex].text;
+
+          api('apiSetPetugas', { trx_id: trxId, petugas: sel.value, idem: uid() })
+            .then(function () {
+              toast('Pesanan diambil atas nama ' + nama + '.', 'ok', '✓ Tersimpan');
+              return lanjut();
+            })
+            .catch(function (e) {
+              toast('Nama gagal disimpan: ' + e.message, 'err');
+              return lanjut();
+            });
+        }
+      });
+    }).catch(function () { lanjut(); });
+  },
+
+  ambilLaluCetak: function (trxId, tombol, labelAwal) {
+    if (tombol) btnBusy(tombol, true, 'Menyiapkan');
+    return api('apiPrintResep', { trx_id: trxId, idem: uid() }).then(function (d) {
+      if (tombol) btnBusy(tombol, false, labelAwal || '🖨 Cetak resep');
+      Resep.cetak(d);
+      return d;
+    }).catch(function (e) {
+      if (tombol) btnBusy(tombol, false, labelAwal || '🖨 Cetak resep');
+      toast(e.message, 'err');
+      throw e;
+    });
+  }
+};
+
+/* ============================================================
+   HALAMAN CETAK RESEP — untuk Sales dan Admin
+   ============================================================ */
+App.pages.resep = {
+  title: 'Cetak Resep',
+  hari: 1,
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<div class="between">' +
+          '<div><h3 class="mb0">Pesanan yang bisa dicetak resepnya</h3>' +
+          '<p class="hint mb0">Resep bisa dicetak sejak pesanan dikonfirmasi, tanpa ' +
+          'menunggu Gudang selesai. Hilang sendiri setelah masuk Kasir.</p></div>' +
+          '<div class="inline" id="rp-hari">' +
+            '<button class="btn sm" data-h="1">Hari ini</button>' +
+            '<button class="btn sm ghost" data-h="3">3 hari</button>' +
+            '<button class="btn sm ghost" data-h="7">7 hari</button>' +
+
+            /*
+             * Tab draft berdiri sendiri.
+             *
+             * Draft tidak punya tanggal nota dan umurnya bisa
+             * berhari-hari sambil menunggu customer memastikan.
+             * Disatukan dengan tab periode, dia gampang lewat —
+             * padahal barangnya sedang di-keep dan resepnya yang
+             * ditempel di barang itu.
+             */
+            (['EKSEKUSI', 'SALES_ONLINE', 'SUPERADMIN']
+               .indexOf(App.state.session.role) >= 0
+              ? '<button class="btn sm ghost" data-h="draft">📝 Draft</button>' : '') +
+          '</div>' +
+        '</div>' +
+        '<input type="text" id="rp-q" class="mt16" placeholder="Cari nomor transaksi atau nama customer…">' +
+      '</div>' +
+      '<div class="mt16" id="rp-list"><div class="empty">Memuat…</div></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.resep;
+
+    document.getElementById('rp-hari').onclick = function (e) {
+      var b = e.target.closest('button[data-h]'); if (!b) return;
+      P.hari = b.dataset.h === 'draft' ? 'draft' : Number(b.dataset.h);
+      document.querySelectorAll('#rp-hari button').forEach(function (x) {
+        x.classList.toggle('ghost', x.dataset.h !== b.dataset.h);
+      });
+      P.load();
+    };
+    document.getElementById('rp-q').oninput = debounce(function () { P.load(); }, 280);
+    P.load();
+  },
+
+  load: function () {
+    var P = App.pages.resep;
+
+    /*
+     * Berhenti kalau halamannya sudah tidak di layar.
+     *
+     * Penyegaran berkala bisa memanggil pemuat ini sesaat setelah
+     * orangnya pindah menu. Tanpa penjagaan, kotak pencariannya
+     * sudah tidak ada dan yang muncul pesan gagal — padahal tidak
+     * ada yang gagal, cuma halamannya sudah ditinggalkan.
+     */
+    var kotakQ = document.getElementById('rp-q');
+    var kotakList = document.getElementById('rp-list');
+    if (!kotakQ || !kotakList) return;
+
+    var q = kotakQ.value.trim();
+
+    /*
+     * Daftar ini dibaca langsung, tanpa salinan.
+     *
+     * Isinya berubah cepat — pesanan masuk saat dikonfirmasi dan
+     * keluar saat sampai Kasir. Salinan berumur dua puluh detik pun
+     * cukup untuk membuat Sales melihat daftar kosong padahal
+     * pesanannya baru saja dikonfirmasi, atau sebaliknya melihat
+     * pesanan yang sudah lewat.
+     *
+     * Daftarnya pendek, jadi membacanya langsung tidak mahal.
+     */
+
+    /*
+     * Tab yang sedang dibuka dikunci selama permintaan berjalan.
+     *
+     * Pembaruan otomatis berjalan tiap beberapa detik. Kalau
+     * jawabannya datang setelah orangnya berpindah tab, isi tab
+     * lama digambar di tab baru — dan terlihat seperti daftarnya
+     * hilang sendiri.
+     */
+    var tabSaat = P.hari;
+
+    api('apiResepList', P.hari === 'draft'
+      ? { scope: 'draft', q: q }
+      : { hari: P.hari, q: q }).then(function (d) {
+
+      if (P.hari !== tabSaat) return;
+      if (!d.list.length) {
+        document.getElementById('rp-list').innerHTML =
+          '<div class="empty"><b>Tidak ada pesanan</b>' +
+          'Pesanan muncul di sini begitu dikonfirmasi, dan hilang sendiri ' +
+          'setelah masuk Kasir. Untuk mencetak ulang yang sudah lewat, ' +
+          'minta ke Admin.</div>';
+        return;
+      }
+
+      document.getElementById('rp-list').innerHTML =
+        /*
+         * Kolom status dibuang.
+         *
+         * Daftar ini sekarang hanya berisi pesanan yang memang belum
+         * sampai Kasir, jadi statusnya selalu salah satu dari tiga
+         * tahap awal — tidak membedakan apa pun, cuma memakan lebar
+         * layar. Yang dicari orang di sini: nomor, nama, dan tombol
+         * cetak.
+         */
+        '<div class="table-wrap"><table><thead><tr>' +
+          '<th>Nomor</th><th>Customer</th><th>Sales</th>' +
+          '<th class="num">Total</th><th style="width:150px"></th>' +
+        '</tr></thead><tbody>' +
+        d.list.map(function (t) {
+          return '<tr>' +
+            '<td><b class="mono">' + Fmt.esc(t.trx_no) + '</b>' +
+              (t.stage_status === 'DRAFT'
+                ? ' <span class="badge warn">Draft</span>' : '') +
+              '<div class="small muted">' + Fmt.esc(t.trx_date) + '</div></td>' +
+            '<td>' + Fmt.esc(t.cust_name) + '</td>' +
+            '<td class="small">' + Fmt.esc(t.sales_name || '—') + '</td>' +
+            '<td class="num mono">' + Fmt.rp(t.grand_total) + '</td>' +
+            '<td><button class="btn sm rp-print" data-id="' + Fmt.esc(t.trx_id) + '">🖨 Cetak</button>' +
+              (t.print_count
+                ? '<div class="small muted">sudah ' + t.print_count + 'x</div>' : '') +
+            '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+
+      document.querySelectorAll('.rp-print').forEach(function (b) {
+        b.onclick = function () {
+          Resep.cetakDenganPic(b.dataset.id, b, '🖨 Cetak', function () { P.load(); });
+        };
+      });
+    }).catch(function (e) {
+      document.getElementById('rp-list').innerHTML =
+        '<div class="empty"><b>Data tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+    });
+  }
+};
+
+/* ============================================================
+   FORM UNIT RUSAK
+
+   Ditempel di unit yang ditarik dari customer. Tanpa penanda fisik,
+   unit rusak yang sudah diturunkan gampang tercampur lagi dengan
+   stok bagus — dan baru ketahuan saat terjual ke orang berikutnya.
+
+   Ukurannya sama dengan resep, supaya memakai kertas yang sama dan
+   tidak perlu mengganti setelan printer.
+   ============================================================ */
+var FormRusak = {
+
+  ambilLaluCetak: function (trxId, gantiId, tombol, labelAwal) {
+    if (tombol) btnBusy(tombol, true, 'Menyiapkan');
+
+    return api('apiFormRusak', { trx_id: trxId, ganti_id: gantiId || '' })
+      .then(function (d) {
+        if (tombol) btnBusy(tombol, false, labelAwal || '🖨 Form rusak');
+        FormRusak.cetak(d);
+        return d;
+      }).catch(function (e) {
+        if (tombol) btnBusy(tombol, false, labelAwal || '🖨 Form rusak');
+        toast(e.message, 'err');
+        throw e;
+      });
+  },
+
+  /* Kertasnya sendiri — isinya jauh lebih sedikit daripada resep */
+  lebar: 80,
+  tinggi: 105,
+
+  cetak: function (d) {
+    Resep.siapkanGaya(FormRusak.lebar, FormRusak.tinggi);
+
+    var area = document.getElementById('resep-area');
+    if (!area) {
+      area = document.createElement('div');
+      area.id = 'resep-area';
+      document.body.appendChild(area);
+    }
+
+    area.innerHTML = FormRusak.html(d);
+    setTimeout(function () {
+      try { window.print(); }
+      catch (e) { toast('Browser menolak membuka jendela cetak.', 'err'); }
+    }, 250);
+  },
+
+  html: function (d) {
+    var isi = FormRusak.lebar - (Resep.marginKiri * 2);
+
+    /*
+     * Isinya sengaja sedikit.
+     *
+     * Form ini urusan internal — menempel di unit yang ditarik supaya
+     * tidak tercampur lagi dengan stok bagus. Nama customer, nomor
+     * nota, dan SN penggantinya tidak ada hubungannya dengan itu, dan
+     * kertas yang menempel di barang sebaiknya tidak membawa data
+     * pembeli ke mana-mana.
+     *
+     * Yang dibutuhkan orang Gudang saat memegang unitnya: barang apa,
+     * SN berapa, rusaknya apa, siapa yang menyerahkan, kapan.
+     */
+    var baris = function (label, nilai) {
+      return '<tr>' +
+        '<td style="padding:1.4mm 0;width:22mm;color:#444;font-size:8pt;' +
+          'vertical-align:top">' + Fmt.esc(label) + '</td>' +
+        '<td style="padding:1.4mm 0;font-size:9.5pt;font-weight:700;' +
+          'vertical-align:top">' + Fmt.esc(nilai || '—') + '</td>' +
+      '</tr>';
+    };
+
+    var tgl = Fmt.jam(d.minta_at || d.dicetak_at);
+
+    return '' +
+      '<div style="width:' + isi + 'mm;font-family:Arial,Helvetica,sans-serif;color:#000">' +
+
+        '<div style="border:2pt solid #000;padding:2.5mm;text-align:center;' +
+          'margin-bottom:2.5mm">' +
+          '<div style="font-size:14pt;font-weight:800;letter-spacing:.5pt">' +
+            'UNIT RUSAK</div>' +
+        '</div>' +
+
+        '<table style="width:100%;border-collapse:collapse">' +
+          baris('Tanggal', tgl) +
+          baris('Barang', d.product_name) +
+          (d.product_code ? baris('Kode', d.product_code) : '') +
+        '</table>' +
+
+        '<div style="border:1.2pt solid #000;padding:2.2mm;margin:2.2mm 0">' +
+          '<div style="font-size:8.5pt;color:#444">SERIAL NUMBER</div>' +
+          '<div style="font-size:11pt;font-weight:800;letter-spacing:.3pt;' +
+            'word-break:break-all;margin-top:.8mm">' +
+            Fmt.esc(d.sn_rusak || '(tanpa SN)') + '</div>' +
+        '</div>' +
+
+        '<div style="border:1pt solid #000;padding:2.2mm;margin-bottom:2.2mm;' +
+          'min-height:15mm">' +
+          '<div style="font-size:8.5pt;color:#444">KETERANGAN KERUSAKAN</div>' +
+          '<div style="font-size:9.5pt;font-weight:600;margin-top:1mm;' +
+            'line-height:1.45">' + Fmt.esc(d.keluhan || '—') + '</div>' +
+        '</div>' +
+
+        '<table style="width:100%;border-collapse:collapse">' +
+          baris('Dilaporkan', (d.serahkan_ke || d.minta_by || d.sales_name) +
+            (d.serahkan_divisi ? ' · ' + d.serahkan_divisi : '')) +
+        '</table>' +
+
+        /*
+         * Siapa yang menunggu penggantinya.
+         *
+         * Form ini ikut turun ke Gudang bersama unit rusaknya, jadi
+         * sekalian jadi pengingat unit penggantinya diserahkan ke
+         * siapa — tidak perlu membuka aplikasi lagi.
+         */
+        (d.serahkan_ke
+          ? '<div style="border:1pt dashed #000;padding:2.5mm;margin-top:2.5mm;' +
+            'text-align:center">' +
+            '<span style="font-size:8.5pt;color:#444">UNIT PENGGANTI DISERAHKAN KE</span>' +
+            '<div style="font-size:11pt;font-weight:800;margin-top:.6mm">' +
+              Fmt.esc(d.serahkan_ke) +
+              (d.serahkan_divisi ? ' · ' + Fmt.esc(d.serahkan_divisi) : '') + '</div>' +
+            '</div>'
+          : '') +
+
+        '<table style="width:100%;margin-top:3.5mm;border-collapse:collapse">' +
+          '<tr>' +
+            '<td style="width:50%;text-align:center;font-size:8.5pt;color:#444">' +
+              Fmt.esc(d.serahkan_divisi || 'Sales') + '</td>' +
+            '<td style="width:50%;text-align:center;font-size:8.5pt;color:#444">' +
+              'Gudang</td>' +
+          '</tr>' +
+          '<tr><td style="height:11mm"></td><td></td></tr>' +
+          '<tr>' +
+            '<td style="text-align:center;border-top:.8pt solid #000;' +
+              'font-size:8pt;padding-top:1.2mm">Nama terang</td>' +
+            '<td style="text-align:center;border-top:.8pt solid #000;' +
+              'font-size:8pt;padding-top:1.2mm">Nama terang</td>' +
+          '</tr>' +
+        '</table>' +
+      '</div>';
+  }
+};
+</script>

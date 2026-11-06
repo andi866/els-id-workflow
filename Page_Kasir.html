@@ -1,0 +1,1159 @@
+<script>
+/* ============================================================
+   Halaman Kasir
+
+   Status pembayaran tidak pernah diketik — selalu dihitung dari
+   riwayat. Kasir mencatat "terima sekian", sistem yang menyimpulkan
+   itu DP atau lunas.
+   ============================================================ */
+
+App.pages.pay = {
+  title: 'Pembayaran',
+  // Terbuka di pekerjaan hari ini, bukan di tumpukan tunggakan
+  s: { scope: 'hari_ini' },
+
+  html: function (param) {
+    if (param) return '<div id="ks-root"><div class="empty">Membuka transaksi…</div></div>';
+    return '' +
+      '<div class="grid c3" id="ks-stat"></div>' +
+      '<div class="card mt16">' +
+        '<div class="between">' +
+          '<div class="inline" id="ks-scope">' +
+            /*
+             * "Hari ini" didahulukan dan terbuka sejak awal.
+             *
+             * Yang dibuka pertama oleh Kasir tiap pagi adalah
+             * pekerjaan hari itu. Kalau yang terbuka "menunggu bayar",
+             * transaksi hari ini tercampur dengan tunggakan berhari-
+             * hari sebelumnya — dan yang baru masuk justru paling
+             * sulit ditemukan.
+             */
+            '<button class="btn sm" data-s="hari_ini">Hari ini</button>' +
+            '<button class="btn sm ghost" data-s="menunggu">Menunggu bayar</button>' +
+            '<button class="btn sm ghost" data-s="dp">DP, belum lunas</button>' +
+            '<button class="btn sm ghost" data-s="tempo">Tempo berjalan</button>' +
+            '<button class="btn sm ghost" data-s="belum_lunas">Semua belum lunas</button>' +
+          '</div>' +
+          '<button class="btn sm ghost" id="ks-refresh" title="Muat ulang">↻</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="mt16" id="ks-list"><div class="empty"><b>Memuat<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div></div>';
+  },
+
+  mount: function (view, param) {
+    var P = App.pages.pay;
+    if (param) { KasirDetail.buka(param); return; }
+
+    /*
+     * Selalu terbuka di pekerjaan hari ini.
+     *
+     * Tab yang dipilih sebelumnya ikut terbawa selama aplikasinya
+     * tidak ditutup. Kasir yang kemarin sempat membuka "Semua belum
+     * lunas" besoknya mendapat layar itu lagi — dan mengira
+     * transaksi hari ini belum masuk.
+     */
+    P.s.scope = 'hari_ini';
+
+    document.getElementById('ks-scope').onclick = function (e) {
+      var b = e.target.closest('button[data-s]'); if (!b) return;
+      P.s.scope = b.dataset.s;
+      document.querySelectorAll('#ks-scope button').forEach(function (x) {
+        x.classList.toggle('ghost', x.dataset.s !== P.s.scope);
+      });
+      P.load(true);
+    };
+    document.getElementById('ks-refresh').onclick = function () { P.load(true); };
+    P.load(true);
+  },
+
+  load: function (segar) {
+    var P = App.pages.pay;
+
+    /*
+     * Seluruh pemuatan dibungkus penangkap kesalahan.
+     *
+     * Kalau ada yang gagal sebelum permintaan dikirim — fungsi yang
+     * belum ada karena satu berkas tertinggal saat deploy, misalnya —
+     * layar berhenti di "Memuat…" tanpa pesan apa pun, dan tidak ada
+     * yang bisa menduga apa yang terjadi.
+     *
+     * Dengan ini kesalahannya selalu tampil di layar.
+     */
+    try {
+      P.loadInti(segar);
+    } catch (e) {
+      var w = document.getElementById('ks-list');
+      if (w) {
+        w.innerHTML = '<div class="empty"><b>Layar gagal dimuat</b>' +
+          Fmt.esc(String(e && e.message ? e.message : e)) +
+          '<div class="small muted mt8">Biasanya ada berkas yang belum ' +
+          'ter-deploy. Sebutkan pesan ini ke yang memasang sistemnya.</div>' +
+          '<div class="mt16"><button class="btn ghost" ' +
+          'onclick="App.pages.pay.load(true)">Coba lagi</button></div></div>';
+      }
+      try { console.error('Kasir gagal:', e); } catch (x) {}
+    }
+  },
+
+  loadInti: function (segar) {
+    var P = App.pages.pay;
+
+    /*
+     * Tempo punya daftarnya sendiri.
+     *
+     * Barangnya sudah keluar, jadi tidak ada lagi yang ditunggu di
+     * antrian pembayaran — tapi uangnya belum masuk. Kalau dicampur
+     * dengan antrian biasa, yang satu terlihat seperti pekerjaan
+     * yang tertahan, padahal bukan.
+     */
+    /*
+     * Tiap perpindahan tab memuat ulang dari server.
+     *
+     * Sebelumnya hasilnya disimpan 20 detik per tab. Di layar uang
+     * itu salah: pindah tab lalu kembali menampilkan keadaan yang
+     * sudah lewat, dan tulisan "Memuat…" kadang tertinggal karena
+     * jawabannya datang dari salinan, bukan dari permintaan baru.
+     */
+    var tandaMuat = (typeof memuatHtml === 'function')
+      ? memuatHtml() : '<div class="empty">Memuat…</div>';
+
+    var wadahL = document.getElementById('ks-list');
+    if (wadahL) wadahL.innerHTML = tandaMuat;
+
+    /*
+     * Daftar tempo punya pemuatnya sendiri.
+     *
+     * Diperiksa dulu keberadaannya: kalau berkas layarnya tertinggal
+     * saat deploy, yang muncul pesan jelas — bukan layar yang diam
+     * selamanya.
+     */
+    if (P.s.scope === 'tempo') {
+      if (typeof P.loadTempo !== 'function') {
+        if (wadahL) {
+          wadahL.innerHTML = '<div class="empty"><b>Daftar tempo belum tersedia</b>' +
+            'Berkas layar Kasir belum ter-deploy sepenuhnya.</div>';
+        }
+        return;
+      }
+      P.loadTempo(segar);
+      return;
+    }
+
+    api('apiKasirQueue', { scope: P.s.scope, segar: !!segar }).then(function (d) {
+      var r = d.rekap;
+      document.getElementById('ks-stat').innerHTML =
+        '<div class="stat"><b style="color:var(--danger)">' + r.menunggu + '</b>' +
+          '<span>Menunggu bayar · ' + Fmt.rp(r.nilaiMenunggu) + '</span></div>' +
+        '<div class="stat"><b style="color:var(--warn)">' + r.dp + '</b>' +
+          '<span>DP · sisa ' + Fmt.rp(r.nilaiPiutang) + '</span></div>' +
+        '<div class="stat"><b style="color:var(--ok)">' + r.lunasHariIni + '</b>' +
+          '<span>Lunas hari ini</span></div>';
+
+      /*
+       * Penjaga kedua di sisi layar.
+       *
+       * Yang dibatalkan seharusnya sudah disaring server. Tapi kalau
+       * karena satu dan lain hal lolos — salinan yang belum segar,
+       * penyimpanan yang terputus — Kasir jangan sampai melihat
+       * pekerjaan yang tidak ada.
+       */
+      var daftar = d.list.filter(function (t) {
+        return String(t.stage_status) !== 'DIBATALKAN';
+      });
+
+      if (!daftar.length) {
+        document.getElementById('ks-list').innerHTML =
+          '<div class="empty"><b>Tidak ada transaksi</b>' +
+          'Transaksi muncul di sini setelah Admin membuat nomor nota.</div>';
+        return;
+      }
+
+      document.getElementById('ks-list').innerHTML = daftar.map(function (t) {
+        var warna = t.payment_status === 'LUNAS' ? 'var(--ok)'
+                  : (t.payment_status === 'DP' ? 'var(--warn)' : 'var(--danger)');
+        return '<div class="card" style="margin-bottom:12px;border-left:5px solid ' + warna + '" ' +
+            'data-id="' + Fmt.esc(t.trx_id) + '">' +
+          '<div class="between">' +
+            '<div>' +
+              '<div class="inline" style="margin-bottom:4px">' +
+                Fmt.payBadge(t.payment_status) +
+
+                /*
+                 * Tempo ditandai terpisah dari status bayar.
+                 *
+                 * Status bayarnya tetap "belum bayar" — memang belum
+                 * ada uang masuk. Tapi tanpa penanda ini, Kasir tidak
+                 * bisa membedakan mana yang menunggak dan mana yang
+                 * memang sudah disetujui bayar belakangan.
+                 */
+                (t.tempo_jatuh
+                  ? '<span class="badge warn">Tempo · jatuh ' +
+                    Fmt.esc(t.tempo_jatuh) + '</span>'
+                  : (t.tempo_hari
+                     ? '<span class="badge warn">Minta tempo ' +
+                       t.tempo_hari + ' hari</span>'
+                     : ((Number(t.grand_total) || 0) <= 0
+                        ? '<span class="badge ok">Tanpa tagihan</span>'
+                        : (String(t.cara_bayar || '').toUpperCase() === 'BELUM_BAYAR'
+                           ? '<span class="badge danger">Sales tandai belum bayar</span>'
+                           : '')))) +
+
+                '<span class="badge">' + Fmt.esc(t.nota_no) + '</span>' +
+              '</div>' +
+              '<div style="font-size:18px;font-weight:800" class="mono">' + Fmt.esc(t.trx_no) + '</div>' +
+              '<div style="font-size:15px">Atas nama <b>' + Fmt.esc(t.cust_name) + '</b></div>' +
+              '<div class="small muted">Sales ' + Fmt.esc(t.sales_name || '—') +
+                ' · ' + t.item_count + ' item</div>' +
+            '</div>' +
+            '<div style="text-align:right">' +
+              '<div style="font-size:22px;font-weight:800" class="mono">' +
+                Fmt.rp(t.outstanding > 0 ? t.outstanding : t.grand_total) + '</div>' +
+              '<div class="small muted">' +
+                (t.paid_total > 0 && t.outstanding > 0
+                  ? 'sisa · sudah bayar ' + Fmt.rp(t.paid_total)
+                  : 'total tagihan') + '</div>' +
+              '<button class="btn mt8">' +
+                (t.payment_status === 'LUNAS' ? 'Lihat' : 'Terima bayar') + '</button>' +
+            '</div>' +
+          '</div></div>';
+      }).join('');
+
+      document.getElementById('ks-list').onclick = function (e) {
+        var c = e.target.closest('[data-id]'); if (!c) return;
+        App.go('pay', c.dataset.id);
+      };
+    }).catch(function (e) {
+      var w = document.getElementById('ks-list');
+      if (w) {
+        w.innerHTML = '<div class="empty"><b>Data tidak bisa dimuat</b>' +
+          Fmt.esc(e.message + (e.code ? '  [' + e.code + ']' : '')) +
+          '<div class="mt16"><button class="btn ghost" ' +
+          'onclick="App.pages.pay.load()">Coba lagi</button></div></div>';
+      }
+    });
+  },
+
+  /* ---------- daftar tempo berjalan ---------- */
+  loadTempo: function (segar) {
+    var wadah = document.getElementById('ks-list');
+    if (!wadah) return;
+
+    wadah.innerHTML = (typeof memuatHtml === 'function')
+      ? memuatHtml() : '<div class="empty">Memuat…</div>';
+
+    var st0 = document.getElementById('ks-stat');
+    if (st0) st0.innerHTML = '';
+
+    /*
+     * Penjaga waktu.
+     *
+     * Kalau jawabannya tidak pernah datang — fungsi servernya belum
+     * terpasang, atau permintaannya tersangkut — layar menampilkan
+     * "Memuat…" selamanya tanpa ada yang tahu apa yang terjadi.
+     */
+    var sudahDijawab = false;
+    setTimeout(function () {
+      if (sudahDijawab) return;
+      if (!wadah || !document.body.contains(wadah)) return;
+
+      wadah.innerHTML = '<div class="empty"><b>Terlalu lama menunggu jawaban</b>' +
+        'Daftar tempo tidak bisa dimuat. Kalau ini terus terjadi, kemungkinan ' +
+        'berkas layanannya belum ter-deploy.' +
+        '<div class="mt16"><button class="btn ghost" ' +
+        'onclick="App.pages.pay.loadTempo(true)">Coba lagi</button></div></div>';
+    }, 20000);
+
+    api('apiTempoBerjalan', { segar: !!segar }).then(function (d) {
+      sudahDijawab = true;
+      var st = document.getElementById('ks-stat');
+      if (st) {
+        st.innerHTML =
+          '<div class="stat"><b>' + d.total + '</b><span>Tempo berjalan</span></div>' +
+          '<div class="stat"><b style="color:' +
+            (d.lewat ? 'var(--danger)' : 'var(--ok)') + '">' + d.lewat +
+            '</b><span>Lewat jatuh tempo</span></div>' +
+          '<div class="stat"><b class="mono">' + Fmt.rp(d.nilai) + '</b>' +
+            '<span>Total piutang</span></div>' +
+          '<div class="stat"><b>—</b><span>&nbsp;</span></div>';
+      }
+
+      if (!d.list.length) {
+        wadah.innerHTML = '<div class="empty"><b>Tidak ada tempo berjalan</b>' +
+          'Pesanan tempo muncul di sini setelah Anda menandainya, ' +
+          'dan hilang begitu dilunasi.</div>';
+        return;
+      }
+
+      wadah.innerHTML = '<div class="table-wrap"><table><thead><tr>' +
+        '<th>Transaksi</th><th>Customer</th><th class="kol-opsional">Jatuh tempo</th>' +
+        '<th class="num">Sisa</th><th style="width:90px"></th>' +
+        '</tr></thead><tbody>' +
+        d.list.map(function (t) {
+          return '<tr class="row-mark ' + (t.lewat ? 'off' : 'hold') + '">' +
+            '<td><b class="mono small">' + Fmt.esc(t.trx_no) + '</b>' +
+              '<div class="small muted">' + Fmt.esc(t.tanggal) +
+                (t.nota_no ? ' · ' + Fmt.esc(t.nota_no) : '') + '</div></td>' +
+            '<td>' + Fmt.esc(t.cust_name) +
+              '<div class="small muted">' + Fmt.esc(t.cust_phone) +
+              ' · Sales ' + Fmt.esc(t.sales_name || '—') + '</div></td>' +
+            '<td class="small' + (t.lewat ? '' : ' muted') + '" style="' +
+              (t.lewat ? 'color:var(--danger);font-weight:700' : '') + '">' +
+              (t.menunggu_setuju
+                ? '<b style="color:var(--warn)">Menunggu disetujui</b>'
+                : Fmt.esc(t.jatuh)) +
+              '<div class="small muted">' + t.tempo_hari + ' hari' +
+                (t.disetujui ? ' · ' + Fmt.esc(t.disetujui) : '') + '</div></td>' +
+            '<td class="num mono"><b>' + Fmt.rp(t.outstanding) + '</b></td>' +
+            '<td><button class="btn sm ks-bayar" data-id="' + Fmt.esc(t.trx_id) +
+              '">Terima bayar</button></td>' +
+          '</tr>';
+        }).join('') + '</tbody></table></div>' +
+
+        '<p class="hint mt8">Baris merah sudah lewat jatuh tempo. ' +
+        'Yang bertanda <b>Menunggu disetujui</b> baru diminta Sales — buka ' +
+        'transaksinya untuk menyetujui, barang baru boleh jalan setelah itu.</p>';
+
+      document.querySelectorAll('.ks-bayar').forEach(function (b) {
+        b.onclick = function () { App.go('pay', b.dataset.id); };
+      });
+
+    }).catch(function (e) {
+      sudahDijawab = true;
+      wadah.innerHTML = '<div class="empty"><b>Daftar tempo tidak bisa dimuat</b>' +
+        Fmt.esc(e.message + (e.code ? '  [' + e.code + ']' : '')) +
+        '<div class="mt16"><button class="btn ghost" ' +
+        'onclick="App.pages.pay.loadTempo(true)">Coba lagi</button></div></div>';
+    });
+  }
+};
+
+/* ============================================================
+   LAYAR PEMBAYARAN
+   ============================================================ */
+var KasirDetail = {
+  d: null,
+
+  buka: function (trxId) {
+    apiSimpan('apiKasirGetTrx', { trx_id: trxId }, 'kasir:' + trxId,
+      function (d) {
+        KasirDetail.d = d;
+        KasirDetail.render();
+      }
+    ).catch(function (e) {
+      document.getElementById('ks-root').innerHTML =
+        '<div class="empty"><b>Transaksi tidak bisa dibuka</b>' + Fmt.esc(e.message) +
+        '<div class="mt16"><button class="btn ghost" onclick="App.go(\'pay\')">Kembali</button></div></div>';
+    });
+  },
+
+
+  setD: function (d) { KasirDetail.d = d; KasirDetail.render(); },
+
+  render: function () {
+    var D = KasirDetail;
+    var d = D.d, h = d.header;
+    var lunas = h.payment_status === 'LUNAS';
+    var aktif = d.payments.filter(function (p) { return !p.is_void; });
+
+    document.getElementById('ks-root').innerHTML =
+      '<div class="card">' +
+        '<div class="between">' +
+          '<div>' +
+            '<div style="font-size:22px;font-weight:800" class="mono">' + Fmt.esc(h.trx_no) + '</div>' +
+            '<div style="font-size:16px;margin-top:3px">' + Fmt.esc(h.cust_name) + '</div>' +
+            '<div class="small muted">' + Fmt.esc(h.cust_phone) +
+              (h.cust_email ? ' · ' + Fmt.esc(h.cust_email) : '') +
+              ' · Sales ' + Fmt.esc(h.sales_name || '—') + '</div>' +
+            '<div class="inline mt8">' +
+              /*
+               * Nota penjualan kalau sudah terbit; kalau belum,
+               * nomor nota pesanannya.
+               *
+               * Pesanan indent dibayar dengan nota pesanan — itu
+               * yang dipegang customer di depan meja. Menampilkan
+               * strip membuat Kasir mengira notanya belum ada,
+               * padahal ada di tangan orangnya.
+               */
+              '<span class="badge brand">' +
+                (h.nota_no
+                  ? 'Nota ' + Fmt.esc(h.nota_no)
+                  : (h.nota_indent
+                     ? 'Nota pesanan ' + Fmt.esc(h.nota_indent)
+                     : 'Nota belum terbit')) + '</span>' +
+              Fmt.payBadge(h.payment_status) +
+              Fmt.stageBadge(h.stage_status, h.stage_label) +
+            '</div>' +
+          '</div>' +
+          '<button class="btn ghost" id="ks-back">Kembali</button>' +
+        '</div>' +
+      '</div>' +
+
+      /* ---------- angka besar ---------- */
+      '<div class="card mt16">' +
+        '<div class="between"><span class="muted">Total tagihan</span>' +
+          '<b class="mono" style="font-size:17px">' + Fmt.rp(h.grand_total) + '</b></div>' +
+        '<div class="between mt8"><span class="muted">Sudah dibayar</span>' +
+          '<b class="mono" style="font-size:17px;color:var(--ok)">' + Fmt.rp(h.paid_total) + '</b></div>' +
+        '<div class="sep"></div>' +
+        '<div class="between" style="font-size:26px">' +
+          '<b>' + (lunas ? 'Lunas' : 'Sisa') + '</b>' +
+          '<b class="mono" style="color:' + (lunas ? 'var(--ok)' : 'var(--danger)') + '">' +
+            Fmt.rp(lunas ? 0 : h.outstanding) + '</b></div>' +
+      '</div>' +
+
+      /*
+       * Transaksi yang dibatalkan diberi keterangan tegas.
+       *
+       * Sebelumnya layarnya terbuka tanpa tombol apa pun — Kasir
+       * melihat transaksi yang tidak bisa diapa-apakan dan tidak
+       * tahu kenapa. Lebih baik dikatakan langsung.
+       */
+      (h.dibatalkan
+        ? '<div class="card mt16" style="border-left:5px solid var(--danger)">' +
+          '<b style="color:var(--danger);font-size:16px">Transaksi ini dibatalkan</b>' +
+          '<div class="small muted mt8">Tidak ada pembayaran yang perlu dicatat. ' +
+          'Kalau customer tetap ingin melanjutkan, minta Admin membuat pesanan baru.</div>' +
+          '<button class="btn ghost mt16" onclick="App.go(\'pay\')">Kembali ke antrian</button>' +
+          '</div>'
+        : '') +
+
+      /*
+       * Tombol tempo, hanya untuk pesanan yang memang ditandai tempo
+       * oleh Sales Online.
+       *
+       * Kasir mencatat, bukan memutuskan. Keputusan memberi tempo ada
+       * pada yang memegang perjanjian dengan instansinya — kalau
+       * Kasir bisa memutuskan sendiri, suatu saat ada yang memberi
+       * tempo karena sungkan menolak customer di depan meja.
+       */
+      /*
+       * Nota tanpa tagihan.
+       *
+       * Sebabnya bermacam-macam — barang bonus yang notanya dipisah,
+       * potongan penuh, penggantian unit. Yang disebut keadaannya
+       * saja: tidak ada yang ditagih. Menebak sebabnya di layar
+       * malah membuat Kasir ragu kalau sebabnya ternyata lain.
+       *
+       * Tetap lewat Kasir, bukan dilewati: barang yang keluar tanpa
+       * uang masuk justru yang paling perlu jejak.
+       */
+      (!lunas && h.bisa_bayar && (Number(h.grand_total) || 0) <= 0
+        ? '<div class="card mt16" style="border-left:4px solid var(--ok)">' +
+          '<b>Nota ini tanpa tagihan</b>' +
+          '<p class="hint">Nilainya nol, jadi tidak ada yang dibayarkan. Tekan ' +
+          'tombol di bawah untuk menyelesaikannya — nama Anda tercatat sebagai ' +
+          'yang memproses.</p>' +
+          '<button class="btn block" id="ks-nol">Selesaikan tanpa tagihan</button>' +
+          '</div>'
+        : '') +
+
+      (!lunas && h.bisa_bayar && h.tempo_hari > 0 && !h.tempo_jatuh
+        ? '<div class="card mt16" style="border-left:4px solid var(--warn)">' +
+          '<b>Pesanan ini tempo ' + h.tempo_hari + ' hari</b>' +
+          '<p class="hint">Ditandai Sales Online saat membuat pesanan. ' +
+          'Kalau disetujui, barangnya boleh jalan dan tagihannya tetap ' +
+          'berdiri di daftar Tempo Berjalan sampai dibayar.</p>' +
+          '<button class="btn block" id="ks-tempo" style="background:var(--warn)">' +
+            'Setujui tempo, barang boleh jalan</button>' +
+          '</div>'
+        : '') +
+
+      (h.tempo_jatuh
+        ? '<div class="card mt16" style="border-left:4px solid var(--warn)">' +
+          '<b>Tempo berjalan</b>' +
+          '<div class="between mt8"><span class="muted">Jatuh tempo</span><b>' +
+            Fmt.esc(h.tempo_jatuh) + '</b></div>' +
+          '<div class="between mt8"><span class="muted">Disetujui</span><b>' +
+            Fmt.esc(h.tempo_by || '—') + '</b></div>' +
+          '</div>'
+        : '') +
+
+      /* ---------- form bayar ---------- */
+      (!lunas && h.bisa_bayar ?
+      '<div class="card mt16">' +
+        '<h3>Terima pembayaran</h3>' +
+        '<div class="inline" id="ks-cepat">' +
+          '<button class="btn" data-n="' + h.outstanding + '">Bayar lunas ' +
+            Fmt.rp(h.outstanding) + '</button>' +
+          '<button class="btn ghost" data-n="' + Math.round(h.outstanding / 2) + '">Setengah</button>' +
+          '<button class="btn ghost" data-n="0">Nominal lain</button>' +
+        '</div>' +
+        '<div class="grid c2 mt16">' +
+          '<div class="field"><label>Nominal diterima</label>' +
+            '<input type="text" id="ks-nominal" inputmode="numeric" class="mono" ' +
+              'style="font-size:20px;padding:12px" placeholder="0"></div>' +
+          '<div class="field"><label>Metode</label><select id="ks-metode">' +
+            d.metode.map(function (m) {
+              var label = { CASH: 'Tunai', TRANSFER: 'Transfer', EDC: 'EDC / Debit',
+                            QRIS: 'QRIS', LEASING: 'Leasing / Kredit' }[m] || m;
+              return '<option value="' + m + '">' + label + '</option>';
+            }).join('') + '</select></div>' +
+        '</div>' +
+        '<div class="grid c2">' +
+          '<div class="field"><label>Nomor referensi</label>' +
+            '<input type="text" id="ks-ref" placeholder="nomor struk EDC, berita transfer, dll"></div>' +
+          '<div class="field"><label>Catatan</label>' +
+            '<input type="text" id="ks-note" placeholder="opsional"></div>' +
+        '</div>' +
+        '<div id="ks-preview" class="small muted"></div>' +
+        '<button class="btn block lg mt16" id="ks-simpan">Catat pembayaran</button>' +
+      '</div>' : '') +
+
+      (lunas ?
+      '<div class="card mt16" style="background:var(--ok-soft);border-color:var(--ok)">' +
+        '<b style="font-size:16px;color:var(--ok)">✅ Transaksi ini sudah lunas</b>' +
+        '<div class="small">' +
+          (h.stage_status === 'MENUNGGU_AKTIVASI'
+            ? 'Sudah diteruskan ke Teknisi Support untuk aktivasi.'
+            : 'Status sekarang: ' + Fmt.esc(h.stage_label) + '.') + '</div>' +
+      '</div>' : '') +
+
+      /* ---------- riwayat pembayaran ---------- */
+      '<div class="card mt16">' +
+        '<h3>Riwayat pembayaran</h3>' +
+        (d.payments.length
+          ? '<div style="border-left:2px solid var(--line);margin-left:6px;padding-left:16px">' +
+            d.payments.map(function (p) {
+              var jenis = { DP: 'DP', PELUNASAN: 'Pelunasan', FULL: 'Pembayaran penuh',
+                            REFUND: 'Refund' }[p.type] || p.type;
+              return '<div style="padding:10px 0;position:relative' +
+                  (p.is_void ? ';opacity:.5' : '') + '">' +
+                '<div style="position:absolute;left:-22px;top:16px;width:9px;height:9px;' +
+                  'border-radius:50%;background:' + (p.is_void ? 'var(--muted)' : 'var(--ok)') + '"></div>' +
+                '<div class="between">' +
+                  '<div>' +
+                    '<b>' + jenis + (p.is_void ? ' — DIBATALKAN' : '') + '</b>' +
+                    '<div class="small muted">' + Fmt.esc(Fmt.jam(p.paid_at)) + ' · ' +
+                      Fmt.esc(p.method) + (p.ref_no ? ' · ' + Fmt.esc(p.ref_no) : '') + '</div>' +
+                    '<div class="small muted">Kasir ' + Fmt.esc(p.cashier_name) + '</div>' +
+                    (p.note ? '<div class="small">' + Fmt.esc(p.note) + '</div>' : '') +
+                    (p.is_void ? '<div class="small" style="color:var(--danger)">Alasan: ' +
+                      Fmt.esc(p.void_reason) + '</div>' : '') +
+                  '</div>' +
+                  '<div style="text-align:right">' +
+                    '<b class="mono" style="font-size:16px' + (p.is_void ? ';text-decoration:line-through' : '') +
+                      '">' + Fmt.rp(p.amount) + '</b>' +
+                    (!p.is_void && d.bisaVoid
+                      ? '<div><button class="btn sm ghost ks-void" data-id="' +
+                        Fmt.esc(p.payment_id) + '">Batalkan</button></div>' : '') +
+                  '</div>' +
+                '</div></div>';
+            }).join('') + '</div>'
+          : '<p class="hint mb0">Belum ada pembayaran tercatat.</p>') +
+      '</div>' +
+
+      /* ---------- rincian barang ---------- */
+      '<div class="card mt16">' +
+        '<h3>Rincian barang</h3>' +
+        '<div class="mt16">' +
+          TabelBarang.render(d.items, {
+            harga: true, total: true, sn: true,
+            ringkas: {
+              subtotal: h.subtotal, diskon: h.discount_total,
+              grand: h.grand_total, terbayar: h.paid_total,
+              sisa: h.outstanding
+            }
+          }) +
+        '</div>' +
+        (h.order_note
+          ? '<div class="small muted mt8">Keterangan: ' + Fmt.esc(h.order_note) + '</div>' : '') +
+      '</div>';
+
+    /*
+     * Percakapan divisi, menempel di bawah layarnya.
+     *
+     * Ditaruh di akhir supaya tidak mendorong tombol kerja ke
+     * bawah — yang dibuka orang pertama kali tetap pekerjaannya.
+     */
+    try {
+      var akarCh = document.getElementById('ks-root');
+      if (akarCh && typeof Chat !== 'undefined') {
+        akarCh.insertAdjacentHTML('beforeend', '<div id="chat-box"></div>');
+        Chat.pasang(KasirDetail.d.header.trx_id, 'chat-box');
+      }
+    } catch (eCh) {}
+
+    D.bind();
+  },
+
+  bind: function () {
+    var D = KasirDetail;
+    var d = D.d, h = d.header;
+
+    document.getElementById('ks-back').onclick = function () { App.kembali('pay'); };
+
+    document.querySelectorAll('.ks-void').forEach(function (b) {
+      b.onclick = function () {
+        Modal.open({
+          title: 'Batalkan pembayaran ini?',
+          sub: 'Data pembayaran tidak dihapus, hanya ditandai batal beserta alasannya. ' +
+               'Kalau transaksi jadi tidak lunas lagi, statusnya kembali ke Kasir.',
+          okText: 'Batalkan pembayaran', danger: true,
+          body: '<div class="field mb0"><label>Alasan pembatalan</label>' +
+                '<input type="text" id="ks-vreason" placeholder="contoh: salah input nominal"></div>',
+          onOk: function (close, btn) {
+            var alasan = document.getElementById('ks-vreason').value.trim();
+            if (alasan.length < 4) return toast('Alasan wajib diisi.', 'err');
+            btnBusy(btn, true);
+            api('apiVoidPayment', { payment_id: b.dataset.id, reason: alasan })
+              .then(function (baru) {
+                close(); D.setD(baru);
+                toast('Pembayaran dibatalkan.', 'ok');
+              }).catch(function (e) {
+                btnBusy(btn, false, 'Batalkan pembayaran');
+                toast(e.message, 'err');
+              });
+          }
+        });
+      };
+    });
+
+    var input = document.getElementById('ks-nominal');
+    if (!input) return;
+
+    var preview = function () {
+      var n = Fmt.parseRp(input.value);
+      var el = document.getElementById('ks-preview');
+      if (!n) { el.textContent = ''; return; }
+
+      var sisa = h.outstanding - n;
+      if (sisa > 0) {
+        el.innerHTML = 'Setelah ini <b>DP</b> — sisa <b class="mono">' + Fmt.rp(sisa) + '</b>';
+        el.style.color = 'var(--warn)';
+      } else if (sisa === 0) {
+        el.innerHTML = 'Setelah ini <b>LUNAS</b> dan langsung diteruskan ke Teknisi.';
+        el.style.color = 'var(--ok)';
+      } else {
+        el.innerHTML = 'Nominal melebihi sisa tagihan sebesar <b class="mono">' +
+          Fmt.rp(-sisa) + '</b>. Kalau ini uang kembalian, catat sebesar sisanya saja.';
+        el.style.color = 'var(--danger)';
+      }
+    };
+
+    input.oninput = function () {
+      var n = Fmt.parseRp(input.value);
+      input.value = n ? Fmt.angka(n) : '';
+      preview();
+    };
+    input.onkeydown = function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); document.getElementById('ks-simpan').click(); }
+    };
+
+    var bn = document.getElementById('ks-nol');
+    if (bn) bn.onclick = function () {
+      Modal.open({
+        title: 'Selesaikan tanpa tagihan?',
+        sub: 'Nilainya nol, jadi tidak ada uang yang masuk. Nama Anda tercatat ' +
+             'sebagai yang memprosesnya.',
+        okText: 'Ya, selesaikan',
+        body:
+          '<div class="between"><span class="muted">Customer</span><b>' +
+            Fmt.esc(h.cust_name) + '</b></div>' +
+          '<div class="between mt8"><span class="muted">Nota</span><b class="mono">' +
+            Fmt.esc(h.nota_no || h.nota_indent || '—') + '</b></div>' +
+          '<div class="field mt16 mb0"><label>Keterangan (opsional)</label>' +
+            '<input type="text" id="ks-nolnote" ' +
+            'placeholder="contoh: bonus TRX-… / potongan penuh / unit pengganti"></div>',
+        onOk: function (close, btn) {
+          var el = document.getElementById('ks-nolnote');
+          btnBusy(btn, true, 'Menyimpan');
+
+          api('apiSelesaikanNol', {
+            trx_id: h.trx_id, catatan: el ? el.value : '', idem: uid()
+          }).then(function (r) {
+            close();
+            toast(r.trx_no + ' diselesaikan.', 'ok', '✓ Selesai');
+            App.kembali('pay');
+          }).catch(function (e) {
+            btnBusy(btn, false, 'Ya, selesaikan');
+            toast(e.message + (e.code ? '  [' + e.code + ']' : ''), 'err');
+          });
+        }
+      });
+    };
+
+    var bt = document.getElementById('ks-tempo');
+    if (bt) bt.onclick = function () {
+      Modal.open({
+        title: 'Setujui tempo ' + h.tempo_hari + ' hari?',
+        sub: 'Barang boleh keluar sebelum dibayar. Tagihannya tetap berdiri ' +
+             'di daftar Tempo Berjalan sampai dilunasi, dan nama Anda tercatat ' +
+             'sebagai yang menyetujui.',
+        okText: 'Ya, setujui tempo',
+        body:
+          '<div class="between"><span class="muted">Customer</span><b>' +
+            Fmt.esc(h.cust_name) + '</b></div>' +
+          '<div class="between mt8"><span class="muted">Nilai</span><b class="mono">' +
+            Fmt.rp(h.grand_total) + '</b></div>' +
+          '<div class="field mt16 mb0"><label>Catatan (opsional)</label>' +
+            '<input type="text" id="ks-temponote" ' +
+            'placeholder="contoh: PO sudah diterima, pembayaran via transfer"></div>',
+        onOk: function (close, btn) {
+          var el = document.getElementById('ks-temponote');
+          btnBusy(btn, true, 'Menyimpan');
+
+          api('apiTandaiTempo', {
+            trx_id: h.trx_id, catatan: el ? el.value : '', idem: uid()
+          }).then(function (r) {
+            close();
+            toast(r.pesan, 'ok', '✓ Tempo disetujui');
+            App.kembali('pay');
+          }).catch(function (e) {
+            btnBusy(btn, false, 'Ya, setujui tempo');
+            toast(e.message + (e.code ? '  [' + e.code + ']' : ''), 'err');
+          });
+        }
+      });
+    };
+
+    var cepat = document.getElementById('ks-cepat');
+    if (!cepat) return;
+
+    cepat.onclick = function (e) {
+      var b = e.target.closest('button[data-n]'); if (!b) return;
+      var n = Number(b.dataset.n);
+      input.value = n ? Fmt.angka(n) : '';
+      preview();
+      input.focus();
+      if (!n) input.select();
+    };
+
+    document.getElementById('ks-simpan').onclick = function () { D.simpan(this); };
+    input.focus();
+  },
+
+  simpan: function (tombol, izinkanLebih) {
+    var D = KasirDetail;
+    var h = D.d.header;
+
+    var nominal = Fmt.parseRp(document.getElementById('ks-nominal').value);
+    if (!nominal) return toast('Nominal belum diisi.', 'err');
+
+    var metode = document.getElementById('ks-metode').value;
+    var ref = document.getElementById('ks-ref').value.trim();
+    var note = document.getElementById('ks-note').value.trim();
+    var sisa = h.outstanding - nominal;
+
+    Modal.open({
+      title: sisa <= 0 ? 'Terima pembayaran lunas?' : 'Terima DP?',
+      sub: sisa <= 0
+        ? 'Setelah ini transaksi langsung diteruskan ke Teknisi Support.'
+        : 'Sisa tagihan tetap tercatat dan bisa dilunasi kapan saja.',
+      okText: 'Ya, catat pembayaran',
+      body:
+        '<div class="between"><span class="muted">Customer</span><b>' + Fmt.esc(h.cust_name) + '</b></div>' +
+        '<div class="between mt8"><span class="muted">Nota</span><b class="mono">' +
+          Fmt.esc(h.nota_no) + '</b></div>' +
+        '<div class="between mt8"><span class="muted">Total tagihan</span><b class="mono">' +
+          Fmt.rp(h.grand_total) + '</b></div>' +
+        '<div class="sep"></div>' +
+        '<div class="between" style="font-size:19px"><b>Diterima</b><b class="mono">' +
+          Fmt.rp(nominal) + '</b></div>' +
+        '<div class="between mt8"><span class="muted">Metode</span><b>' + Fmt.esc(metode) + '</b></div>' +
+        (sisa > 0
+          ? '<div class="between mt8"><span class="muted">Sisa setelah ini</span>' +
+            '<b class="mono" style="color:var(--warn)">' + Fmt.rp(sisa) + '</b></div>'
+          : '<div class="mt8 small" style="color:var(--ok);font-weight:700">Transaksi menjadi LUNAS</div>'),
+      onOk: function (close, btn) {
+        var muatan = {
+          trx_id: h.trx_id, revision: h.revision, idem: uid(),
+          amount: nominal, method: metode, ref_no: ref, note: note,
+          izinkan_lebih: !!izinkanLebih
+        };
+
+        /*
+         * Pembayaran juga disimpan di latar belakang, tapi dengan
+         * pengaman paling ketat.
+         *
+         * Uang yang diterima tidak berubah karena Kasir menunggu atau
+         * tidak — yang berubah cuma berapa lama customer berdiri di
+         * depan meja. Jadi layar dilepas, dan penyimpanannya menyusul.
+         *
+         * Yang dijaga: kalau gagal, yang muncul kotak merah berisi
+         * NOMINAL dan NOMOR TRANSAKSINYA, dengan tombol mengulang.
+         * Bukan toast yang bisa terlewat — uang yang tidak tercatat
+         * baru ketahuan saat tutup kas, dan saat itu tidak ada yang
+         * bisa memastikan berapa sebenarnya yang diterima.
+         */
+        close();
+        toast(Fmt.rp(nominal) + ' sedang dicatat…', 'ok',
+              sisa > 0 ? 'Pembayaran diterima' : '✅ Lunas');
+        App.kembali('pay');
+
+        Latar.simpan('apiAddPayment', muatan, {
+          judul: 'Pembayaran ' + Fmt.rp(nominal) + ' — ' + h.trx_no,
+          keterangan: 'Customer: ' + h.cust_name + '. Uang sudah diterima tapi ' +
+                      'BELUM tercatat. Buka lagi transaksinya dan catat sekali lagi.',
+          berhasil: function (baru) {
+            toast(baru.lunasBaru
+              ? h.trx_no + ' lunas, diteruskan ke Teknisi Support.'
+              : Fmt.rp(nominal) + ' tercatat pada ' + h.trx_no + '.',
+              'ok', baru.lunasBaru ? '✅ Lunas' : '✓ Pembayaran tersimpan');
+            if (App.state.page === 'pay' && App.pages.pay.load) App.pages.pay.load();
+          },
+          ulangi: function () { App.go('pay', h.trx_id); },
+          diamSaatGagal: true,
+          gagal: function (e) { KasirDetail.gagalBayar(h, muatan, e); }
+        }).catch(function () {});
+      },
+
+      onOkLama: function (close, btn) {
+        btnBusy(btn, true, 'Menyimpan');
+        api('apiAddPayment', {
+          trx_id: h.trx_id, revision: h.revision, idem: uid(),
+          amount: nominal, method: metode, ref_no: ref, note: note,
+          izinkan_lebih: !!izinkanLebih
+        }).then(function (baru) {
+          close();
+          if (baru.lunasBaru) App.kembali('pay');
+          else D.setD(baru);
+        }).catch(function (e) {
+          btnBusy(btn, false, 'Ya, catat pembayaran');
+          close();
+
+          if (e.code === 'OVER_PAY' && e.details && e.details.boleh_lebih) {
+            Modal.open({
+              title: 'Nominal melebihi sisa tagihan',
+              sub: 'Sisa tagihan ' + Fmt.rp(e.details.sisa) + ', yang diterima ' +
+                   Fmt.rp(e.details.nominal) + '.',
+              okText: 'Tetap catat kelebihannya', danger: true,
+              body: '<div class="small">Biasanya ini salah ketik. Kalau memang uang customer lebih ' +
+                    'dan kembaliannya diberikan tunai, catat sebesar sisa tagihannya saja.</div>',
+              onOk: function (c2, b2) { c2(); D.simpan(tombol, true); }
+            });
+            return;
+          }
+
+          toast(e.message, 'err');
+          if (e.code === 'STALE_DATA') D.buka(h.trx_id);
+        });
+      }
+    });
+  }
+};
+
+/* ============================================================
+   RIWAYAT PEMBAYARAN
+   ============================================================ */
+/**
+ * Kegagalan mencatat pembayaran ditangani tersendiri.
+ *
+ * Nominal dan nomor transaksinya ditampilkan besar, karena inilah satu
+ * hal di seluruh sistem yang kalau terlewat akibatnya tidak bisa
+ * ditelusuri: uang sudah berpindah tangan, catatannya tidak ada.
+ */
+KasirDetail.gagalBayar = function (h, muatan, e) {
+  try { Bunyi.salah(); } catch (x) {}
+
+  // Nominal yang melebihi sisa ditangani dialognya sendiri
+  if (e && e.code === 'OVER_PAY') {
+    toast(e.message, 'err');
+    App.go('pay', h.trx_id);
+    return;
+  }
+
+  Modal.open({
+    title: '⚠ PEMBAYARAN BELUM TERCATAT',
+    sub: 'Uang sudah diterima tapi belum tersimpan di sistem. ' +
+         'Catat ulang sekarang juga, jangan ditunda.',
+    okText: 'Buka & catat ulang', cancelText: 'Nanti',
+    danger: true,
+    body:
+      '<div style="background:var(--danger-soft);padding:14px;border-radius:10px;' +
+        'text-align:center">' +
+        '<div style="font-size:26px;font-weight:800;color:var(--danger)">' +
+          Fmt.rp(muatan.amount) + '</div>' +
+        '<div class="small" style="color:var(--danger)">' +
+          Fmt.esc(muatan.method) + ' · ' + Fmt.esc(h.trx_no) + '</div>' +
+      '</div>' +
+      '<div class="between mt16"><span class="muted">Customer</span><b>' +
+        Fmt.esc(h.cust_name) + '</b></div>' +
+      (muatan.ref_no
+        ? '<div class="between mt8"><span class="muted">Referensi</span><b class="mono">' +
+          Fmt.esc(muatan.ref_no) + '</b></div>' : '') +
+      '<div class="small mt16" style="color:var(--danger)"><b>Alasan gagal:</b> ' +
+        Fmt.esc(e && e.message ? e.message : 'tidak diketahui') + '</div>',
+    onOk: function (tutup) { tutup(); App.go('pay', h.trx_id); }
+  });
+};
+
+App.pages.hist = {
+  title: 'Riwayat Bayar',
+  hari: 7,
+
+  /**
+   * Koreksi catatan pembayaran.
+   *
+   * Yang bisa dibetulkan hanya metode, nomor referensi, dan catatan.
+   * Nominalnya tidak — uang yang sudah tercatat hanya boleh dibatalkan
+   * Super Admin, dengan alasan, dan barisnya tetap terlihat.
+   */
+  formUbah: function (p, d) {
+    var metodeOpt = (d.metode || ['CASH', 'TRANSFER', 'EDC', 'QRIS', 'LEASING'])
+      .map(function (m) {
+        var label = { CASH: 'Tunai', TRANSFER: 'Transfer', EDC: 'EDC / Debit',
+                      QRIS: 'QRIS', LEASING: 'Leasing / Kredit' }[m] || m;
+        return '<option value="' + m + '"' + (m === p.method ? ' selected' : '') + '>' +
+               label + '</option>';
+      }).join('');
+
+    Modal.open({
+      title: 'Betulkan catatan pembayaran',
+      sub: 'Nominal tidak bisa diubah di sini. Kalau jumlahnya yang salah, ' +
+           'minta Super Admin membatalkan pembayaran ini lalu catat ulang.',
+      okText: 'Simpan perubahan',
+      body:
+        '<div class="between"><span class="muted">Transaksi</span><b class="mono">' +
+          Fmt.esc(p.trx_no) + '</b></div>' +
+        '<div class="between mt8"><span class="muted">Nominal</span><b class="mono">' +
+          Fmt.rp(p.amount) + '</b></div>' +
+        '<div class="between mt8"><span class="muted">Dicatat</span><b>' +
+          Fmt.esc(Fmt.jam(p.paid_at)) + '</b></div>' +
+        '<div class="sep"></div>' +
+        '<div class="field"><label>Metode</label>' +
+          '<select id="hs-metode">' + metodeOpt + '</select></div>' +
+        '<div class="field"><label>Nomor referensi</label>' +
+          '<input type="text" id="hs-ref" value="' + Fmt.esc(p.ref_no) + '" ' +
+          'placeholder="nomor struk EDC, berita transfer, dll"></div>' +
+        '<div class="field"><label>Catatan</label>' +
+          '<input type="text" id="hs-note" value="' + Fmt.esc(p.note) + '"></div>' +
+        '<div class="field mb0"><label>Alasan perubahan</label>' +
+          '<input type="text" id="hs-alasan" placeholder="contoh: nomor struk salah ketik"></div>' +
+        (d.bisaVoid
+          ? '<div class="sep"></div>' +
+            '<button class="btn sm ghost" id="hs-void" style="color:var(--danger)">' +
+            'Batalkan pembayaran ini</button>'
+          : ''),
+
+      onMount: function () {
+        var v = document.getElementById('hs-void');
+        if (v) v.onclick = function () { App.pages.hist.formVoid(p); };
+      },
+
+      onOk: function (close, btn) {
+        btnBusy(btn, true);
+        api('apiUpdatePaymentNote', {
+          payment_id: p.payment_id,
+          method: document.getElementById('hs-metode').value,
+          ref_no: document.getElementById('hs-ref').value,
+          note: document.getElementById('hs-note').value,
+          reason: document.getElementById('hs-alasan').value
+        }).then(function (r) {
+          close();
+          toast(r.changed ? 'Catatan pembayaran diperbarui.' : 'Tidak ada perubahan.', 'ok');
+          App.pages.hist.load();
+        }).catch(function (e) {
+          btnBusy(btn, false, 'Simpan perubahan');
+          toast(e.message, 'err');
+        });
+      }
+    });
+  },
+
+  formVoid: function (p) {
+    Modal.open({
+      title: 'Batalkan pembayaran ini?',
+      sub: 'Data tidak dihapus, hanya ditandai batal beserta alasannya. ' +
+           'Kalau transaksi jadi tidak lunas lagi, statusnya kembali ke Kasir.',
+      okText: 'Batalkan pembayaran', danger: true,
+      body: '<div class="between"><span class="muted">Nominal</span><b class="mono">' +
+              Fmt.rp(p.amount) + '</b></div>' +
+            '<div class="field mt16 mb0"><label>Alasan pembatalan</label>' +
+            '<input type="text" id="hs-vreason" placeholder="contoh: salah input nominal"></div>',
+      onOk: function (close, btn) {
+        var alasan = document.getElementById('hs-vreason').value.trim();
+        if (alasan.length < 4) return toast('Alasan wajib diisi.', 'err');
+        btnBusy(btn, true);
+        api('apiVoidPayment', { payment_id: p.payment_id, reason: alasan })
+          .then(function () {
+            close();
+            toast('Pembayaran dibatalkan.', 'ok');
+            App.pages.hist.load();
+          }).catch(function (e) {
+            btnBusy(btn, false, 'Batalkan pembayaran');
+            toast(e.message, 'err');
+          });
+      }
+    });
+  },
+
+  html: function () {
+    return '' +
+      '<div class="card">' +
+        '<div class="between">' +
+          '<div style="flex:1;min-width:200px">' +
+            '<h3 class="mb0">Riwayat pembayaran</h3>' +
+            '<p class="hint mb0">Cari lewat nomor transaksi, nota, nama customer, atau nomor referensi.</p>' +
+          '</div>' +
+          /*
+           * Hari ini, atau rentang tanggal yang ditentukan sendiri.
+           *
+           * Pilihan "7 hari" dan "30 hari" dibuang: yang dicari Kasir
+           * hampir selalu tanggal tertentu — penutupan bulan, atau
+           * hari saat sebuah pembayaran dipertanyakan. Menghitung
+           * mundur dari hari ini tidak membantu untuk itu.
+           */
+          '<div class="inline" id="hs-hari">' +
+            '<button class="btn sm" data-h="1">Hari ini</button>' +
+          '</div>' +
+        '</div>' +
+
+        '<input type="text" id="hs-q" class="mt16" placeholder="Cari…" autocomplete="off">' +
+
+        '<div class="sep"></div>' +
+        '<div class="inline" style="gap:8px">' +
+          '<input type="date" id="hs-dari" title="Dari tanggal" ' +
+            'style="flex:1 1 118px;min-width:0">' +
+          '<input type="date" id="hs-sampai" title="Sampai tanggal" ' +
+            'style="flex:1 1 118px;min-width:0">' +
+          '<button class="btn sm" id="hs-periode">Tampilkan</button>' +
+          '<button class="btn sm ghost" id="hs-reset">Hapus</button>' +
+        '</div>' +
+        '<div id="hs-info" class="mt8"></div>' +
+      '</div>' +
+      '<div class="mt16" id="hs-rekap"></div>' +
+      '<div class="mt16" id="hs-list"><div class="empty"><b>Memuat<span class="titik"><i>.</i><i>.</i><i>.</i></span></b></div></div>';
+  },
+
+  mount: function () {
+    var P = App.pages.hist;
+    P.hari = 1;
+    P.dari = ''; P.sampai = '';
+
+    document.getElementById('hs-hari').onclick = function (e) {
+      var b = e.target.closest('button[data-h]'); if (!b) return;
+      P.hari = Number(b.dataset.h);
+      P.dari = ''; P.sampai = '';
+      document.getElementById('hs-dari').value = '';
+      document.getElementById('hs-sampai').value = '';
+      P.load();
+    };
+
+    document.getElementById('hs-periode').onclick = function () {
+      P.dari = document.getElementById('hs-dari').value;
+      P.sampai = document.getElementById('hs-sampai').value;
+      if (!P.dari && !P.sampai) return toast('Isi dulu tanggalnya.', 'err');
+
+      /*
+       * Rentangnya dihitung jadi jumlah hari ke belakang, supaya
+       * server tidak perlu diubah — lalu hasilnya disaring lagi di
+       * layar sesuai tanggal yang benar-benar dipilih.
+       */
+      var akhir = P.sampai ? new Date(P.sampai) : new Date();
+      var awal = P.dari ? new Date(P.dari) : akhir;
+      var selisih = Math.ceil((new Date() - awal) / 86400000) + 1;
+      P.hari = Math.min(Math.max(selisih, 1), 400);
+
+      P.load();
+    };
+
+    document.getElementById('hs-reset').onclick = function () {
+      P.dari = ''; P.sampai = ''; P.hari = 1;
+      document.getElementById('hs-dari').value = '';
+      document.getElementById('hs-sampai').value = '';
+      P.load();
+    };
+    document.getElementById('hs-q').oninput = debounce(function () { P.load(); }, 300);
+    P.load();
+  },
+
+  load: function () {
+    var P = App.pages.hist;
+    api('apiRiwayatBayar', { hari: P.hari, q: document.getElementById('hs-q').value.trim() })
+      .then(function (d) {
+        /*
+         * Hasilnya disaring lagi sesuai tanggal yang dipilih.
+         *
+         * Server mengambil sekian hari ke belakang; yang diminta
+         * orang adalah rentang tertentu. Menyaring di sini membuat
+         * jumlah dan daftarnya cocok dengan tanggal yang tertulis,
+         * tanpa perlu mengubah cara server bekerja.
+         */
+        if (P.dari || P.sampai) {
+          var cocok = function (iso) {
+            var tgl = String(iso || '').substring(0, 10);
+            if (!tgl) return false;
+            if (P.dari && tgl < P.dari) return false;
+            if (P.sampai && tgl > P.sampai) return false;
+            return true;
+          };
+
+          d.list = d.list.filter(function (p) { return cocok(p.paid_at); });
+
+          var masuk = 0, perMetode = {};
+          d.list.forEach(function (p) {
+            if (p.is_void) return;
+            masuk += Number(p.amount) || 0;
+            var k = String(p.method || 'LAIN');
+            perMetode[k] = (perMetode[k] || 0) + (Number(p.amount) || 0);
+          });
+
+          d.rekap = { masuk: masuk, jumlah: d.list.length, perMetode: perMetode };
+        }
+
+        var info = document.getElementById('hs-info');
+        if (info) {
+          info.innerHTML = (P.dari || P.sampai)
+            ? '<span class="badge brand">Periode ' + Fmt.esc(P.dari || 'awal') +
+              ' sampai ' + Fmt.esc(P.sampai || 'hari ini') + '</span>'
+            : '';
+        }
+
+        var m = d.rekap.perMetode;
+        document.getElementById('hs-rekap').innerHTML =
+          '<div class="card"><div class="between">' +
+            '<div><b style="font-size:22px" class="mono">' + Fmt.rp(d.rekap.masuk) + '</b>' +
+            '<div class="small muted">' + d.rekap.jumlah + ' pembayaran</div></div>' +
+            '<div class="inline">' +
+              Object.keys(m).map(function (k) {
+                return '<span class="badge">' + Fmt.esc(k) + ' ' + Fmt.rp(m[k]) + '</span>';
+              }).join('') +
+            '</div>' +
+          '</div></div>';
+
+        if (!d.list.length) {
+          document.getElementById('hs-list').innerHTML =
+            '<div class="empty"><b>Belum ada pembayaran</b>Coba perluas rentang waktunya.</div>';
+          return;
+        }
+
+        document.getElementById('hs-list').innerHTML =
+          '<div class="table-wrap"><table><thead><tr>' +
+            '<th>Waktu</th><th>Transaksi</th><th>Metode</th>' +
+            '<th style="text-align:center">Nominal</th><th>Kasir</th><th></th>' +
+          '</tr></thead><tbody>' +
+          d.list.map(function (p) {
+            var jenis = { DP: 'DP', PELUNASAN: 'Pelunasan', FULL: 'Penuh', REFUND: 'Refund' }[p.type] || p.type;
+            return '<tr' + (p.is_void ? ' style="opacity:.5"' : '') + '>' +
+              '<td class="small">' + Fmt.esc(Fmt.jam(p.paid_at)) + '</td>' +
+              '<td><b class="mono">' + Fmt.esc(p.trx_no) + '</b>' +
+                '<div class="small muted">' + Fmt.esc(p.cust_name) +
+                (p.nota_no ? ' · ' + Fmt.esc(p.nota_no) : '') + '</div>' +
+                (p.is_void ? '<div class="small" style="color:var(--danger)">Dibatalkan: ' +
+                  Fmt.esc(p.void_reason) + '</div>' : '') + '</td>' +
+              '<td class="small">' + Fmt.esc(p.method) +
+                '<div class="small muted">' + jenis +
+                (p.ref_no ? ' · ' + Fmt.esc(p.ref_no) : '') + '</div></td>' +
+              '<td class="mono" style="text-align:center' +
+                (p.is_void ? ';text-decoration:line-through' : '') + '">' +
+                Fmt.rp(p.amount) + '</td>' +
+              '<td class="small">' + Fmt.esc(p.cashier_name) + '</td>' +
+              '<td>' + (p.is_void ? '' :
+                '<button class="btn sm ghost hs-edit" data-id="' + Fmt.esc(p.payment_id) +
+                '">Ubah</button>') + '</td>' +
+            '</tr>';
+          }).join('') + '</tbody></table></div>';
+        document.querySelectorAll('.hs-edit').forEach(function (b) {
+          b.onclick = function () {
+            var p = d.list.filter(function (x) { return x.payment_id === b.dataset.id; })[0];
+            if (p) App.pages.hist.formUbah(p, d);
+          };
+        });
+
+      }).catch(function (e) {
+        document.getElementById('hs-list').innerHTML =
+          '<div class="empty"><b>Data tidak bisa dimuat</b>' + Fmt.esc(e.message) + '</div>';
+      });
+  }
+};
+</script>
